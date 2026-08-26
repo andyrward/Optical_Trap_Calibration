@@ -43,10 +43,35 @@ def load_voltage_file(filepath: str | os.PathLike[str]) -> float:
     path = Path(filepath)
     if not path.exists():
         raise FileNotFoundError(f"Voltage file not found: {path}")
-    values = np.loadtxt(path, dtype=float)
-    if values.size == 0:
+
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        text = path.read_bytes().decode("latin-1").strip()
+
+    if not text:
         raise ValueError(f"Voltage file is empty: {path}")
-    return float(np.asarray(values).reshape(-1)[0])
+
+    if "," in text:
+        values = [float(value) for value in text.split(",") if value.strip()]
+        if not values:
+            raise ValueError(f"Voltage file is empty: {path}")
+        return float(values[0])
+
+    for delimiter in (None, "\t", " ", ","):
+        try:
+            values = np.loadtxt(path, dtype=float, delimiter=delimiter, ndmin=1)
+        except ValueError:
+            continue
+        if values.size == 0:
+            continue
+        return float(np.asarray(values).reshape(-1)[0])
+
+    raise ValueError(
+        f"Could not parse voltage file: {path}. "
+        "Expected a single power value or a comma-delimited repeated-value file "
+        "like '102.1,5.0,102.1,5.0,...'."
+    )
 
 
 def _fixed_time_array(length: int) -> np.ndarray:
@@ -64,33 +89,62 @@ def load_position_data(filepath: str | os.PathLike[str]) -> List[np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(f"Data file not found: {path}")
 
-    data = np.loadtxt(path, dtype=float, ndmin=2)
-    if data.size == 0:
-        raise ValueError(f"No data found in file: {path}")
+    load_errors: list[ValueError] = []
+    for delimiter in (None, "\t", " ", ","):
+        try:
+            data = np.loadtxt(path, dtype=float, delimiter=delimiter, ndmin=2)
+        except ValueError as exc:
+            load_errors.append(ValueError(str(exc)))
+            continue
 
-    if data.shape[1] < 2:
+        if data.size == 0:
+            raise ValueError(f"No data found in file: {path}")
+
+        if data.shape[1] < 2:
+            raise ValueError(
+                "Expected at least 2 columns: time and one position channel. "
+                f"Detected {data.shape[1]} column(s) in {path}."
+            )
+
+        time = data[:, 0]
+        if time.shape[0] < 2:
+            raise ValueError("At least two samples are required for calibration.")
+
+        position_columns = data[:, 1:]
+        if position_columns.shape[1] == 1:
+            return [position_columns[:, 0]]
+
+        if position_columns.shape[1] == 2:
+            return [(position_columns[:, 0] + position_columns[:, 1]) / 2.0]
+
+        if position_columns.shape[1] == 6:
+            # MATLAB-style 7-column layout: [time, left1, left2, right1, right2, const, const]
+            trap1_center = (position_columns[:, 0] + position_columns[:, 2]) / 2.0
+            trap2_center = (position_columns[:, 1] + position_columns[:, 3]) / 2.0
+            return [trap1_center, trap2_center]
+
+        if position_columns.shape[1] == 4:
+            trap1_center = (position_columns[:, 0] + position_columns[:, 1]) / 2.0
+            trap2_center = (position_columns[:, 2] + position_columns[:, 3]) / 2.0
+            return [trap1_center, trap2_center]
+
+        if position_columns.shape[1] % 2 == 0:
+            return [
+                position_columns[:, start : start + 2].mean(axis=1)
+                for start in range(0, position_columns.shape[1], 2)
+            ]
+
         raise ValueError(
-            "Expected at least 2 columns: time and one position channel."
+            f"Unsupported data format in {path}: detected {position_columns.shape[1]} position columns "
+            f"after the time column. Expected 1 (center), 2 (left+right), 4 (2 traps), or 6 "
+            "(MATLAB 7-column layout). Check that the file is tab/space-delimited and that the "
+            "time column is first."
         )
 
-    time = data[:, 0]
-    if time.shape[0] < 2:
-        raise ValueError("At least two samples are required for calibration.")
-
-    position_columns = data[:, 1:]
-    if position_columns.shape[1] == 1:
-        return [position_columns[:, 0]]
-
-    if position_columns.shape[1] == 2:
-        return [(position_columns[:, 0] + position_columns[:, 1]) / 2.0]
-
-    if position_columns.shape[1] % 2 == 0:
-        paired = position_columns.reshape(position_columns.shape[0], -1, 2)
-        return [pair.mean(axis=1) for pair in paired]
-
+    details = "; ".join(str(exc) for exc in load_errors)
     raise ValueError(
-        "Unsupported data format. Expected 2 columns (time, center), 3 columns "
-        "(time, left, right), or pairs of position channels for multiple traps."
+        f"Could not parse data file {path}. Expected tab/space-delimited numeric data with a time column. "
+        f"Detected parsing errors: {details}"
     )
 
 
@@ -251,10 +305,10 @@ class OpticalTrapCalibrationApp:
         lines = []
         for result in results:
             lines.append(
-                f"Track {result['track_index']}: gamma={result['gamma']:.3e}, "
-                f"fc={result['corner_frequency_hz']:.2f} Hz, "
-                f"k={result['stiffness_pn_per_nm']:.3f} pN/nm, "
-                f"k/mW={result['stiffness_per_mw']:.3f} pN/nm/mW"
+                f"Trap {result['track_index']}: gamma = {result['gamma']:.3e}, "
+                f"corner freq (fc) = {result['corner_frequency_hz']:.2f} Hz, "
+                f"stiffness k = {result['stiffness_pn_per_nm']:.4f} pN/nm, "
+                f"k/mW = {result['stiffness_per_mw']:.3e} pN/nm/mW"
             )
         self.results_var.set("\n".join(lines))
 
@@ -282,10 +336,10 @@ def _print_calibration_results(results: list[dict], trap_power: float) -> None:
     print(f"Trap power: {trap_power} mW")
     for result in results:
         print(
-            f"Track {result['track_index']}: gamma={result['gamma']:.3e}, "
-            f"fc={result['corner_frequency_hz']:.2f} Hz, "
-            f"k={result['stiffness_pn_per_nm']:.3f} pN/nm, "
-            f"k/mW={result['stiffness_per_mw']:.3f} pN/nm/mW"
+            f"Trap {result['track_index']}: gamma = {result['gamma']:.3e}, "
+            f"corner freq (fc) = {result['corner_frequency_hz']:.2f} Hz, "
+            f"stiffness k = {result['stiffness_pn_per_nm']:.4f} pN/nm, "
+            f"k/mW = {result['stiffness_per_mw']:.3e} pN/nm/mW"
         )
 
 
