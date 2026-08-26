@@ -121,7 +121,7 @@ GitHub Actions automatically builds Windows and macOS executables.
 
 - Click **Run workflow** on the Actions page for a manual build.
 - Push Python changes to `main`.
-- Create and push a release tag that matches `v*.*.*`.
+- Create and push a release tag that starts with `v`.
 
 ### Platform notes
 

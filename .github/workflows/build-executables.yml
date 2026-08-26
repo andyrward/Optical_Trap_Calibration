@@ -24,8 +24,8 @@ jobs:
             source_executable: dist/optical_trap_calibration.exe
             artifact_name: optical-trap-calibration-windows.exe
           - os: macos-latest
-            source_executable: dist/optical_trap_calibration
-            artifact_name: optical-trap-calibration-macos
+            source_executable: dist/optical_trap_calibration.app
+            artifact_name: optical-trap-calibration-macos.zip
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -47,18 +47,23 @@ jobs:
         run: python -m pip install pyinstaller==6.22.2
 
       - name: Build executable
-        run: >
-          python -m PyInstaller
-          --onefile
-          --windowed
-          --name optical_trap_calibration
-          optical_trap_calibration.py
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            python -m PyInstaller --windowed --name optical_trap_calibration optical_trap_calibration.py
+          else
+            python -m PyInstaller --onefile --windowed --name optical_trap_calibration optical_trap_calibration.py
+          fi
 
       - name: Package executable artifact
         shell: bash
         run: |
           mkdir -p release-assets
-          cp "${{ matrix.source_executable }}" "release-assets/${{ matrix.artifact_name }}"
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ditto -ck --sequesterRsrc --keepParent "${{ matrix.source_executable }}" "release-assets/${{ matrix.artifact_name }}"
+          else
+            cp "${{ matrix.source_executable }}" "release-assets/${{ matrix.artifact_name }}"
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -94,7 +99,7 @@ jobs:
             Download the platform-specific executable from this release or from the Actions artifacts.
 
             - Windows: `optical-trap-calibration-windows.exe`
-            - macOS: `optical-trap-calibration-macos`
+            - macOS: `optical-trap-calibration-macos.zip`
 
             ## Usage notes
 
