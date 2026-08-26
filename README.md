@@ -37,6 +37,9 @@ Supported formats:
 - one trap, single center trace: `time, center`
 - one trap, left/right edges: `time, left_edge, right_edge`
 - two traps, each with a center trace or left/right pairs: additional columns are averaged in pairs
+- MATLAB-style two-trap measurement: `time, left_1, left_2, right_1, right_2, const, const`
+
+This 7-column layout is the format produced by the MATLAB code for two traps and two tracks per trap. The loader ignores the time column and averages each left/right edge pair to produce the two trap centers; `compute_averaged_psd()` reconstructs the alternating 0.710/0.720 ms grid before averaging the PSD blocks.
 
 Example:
 
@@ -62,7 +65,7 @@ then the calibration expects:
 /path/to/sample_Voltage.dat
 ```
 
-The first value in the voltage file is read as the trap power in mW.
+The first value in the voltage file is read as the trap power in mW. Real MATLAB files can store repeated alternating values such as `102.1,5.0,102.1,5.0,...`; the loader ignores the repeats and uses the first numeric value as the trap power.
 
 Example:
 
