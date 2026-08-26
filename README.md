@@ -39,7 +39,7 @@ Supported formats:
 - two traps, each with a center trace or left/right pairs: additional columns are averaged in pairs
 - MATLAB-style two-trap measurement: `time, left_1, left_2, right_1, right_2, const, const`
 
-This 7-column layout is the format produced by the MATLAB code for two traps and two tracks per trap. The loader ignores the time column and reconstructs the alternating 0.710/0.720 ms grid internally, then averages the left/right edge pairs to produce the two trap centers.
+This 7-column layout is the format produced by the MATLAB code for two traps and two tracks per trap. The loader ignores the time column and averages each left/right edge pair to produce the two trap centers; `compute_averaged_psd()` reconstructs the alternating 0.710/0.720 ms grid before averaging the PSD blocks.
 
 Example:
 

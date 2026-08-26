@@ -53,12 +53,12 @@ def load_voltage_file(filepath: str | os.PathLike[str]) -> float:
         raise ValueError(f"Voltage file is empty: {path}")
 
     if "," in text:
-        values = [float(value) for value in text.split(",") if value.strip()]
-        if not values:
+        first_value = next((value.strip() for value in text.split(",") if value.strip()), None)
+        if first_value is None:
             raise ValueError(f"Voltage file is empty: {path}")
-        return float(values[0])
+        return float(first_value)
 
-    for delimiter in (None, "\t", " ", ","):
+    for delimiter in (None, "\t", " "):
         try:
             values = np.loadtxt(path, dtype=float, delimiter=delimiter, ndmin=1)
         except ValueError:

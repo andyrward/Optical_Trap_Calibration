@@ -30,7 +30,6 @@ class CalibrationTestCase(unittest.TestCase):
         self.assertEqual(len(tracks), 2)
         for track in tracks:
             self.assertEqual(track.shape[0], 65536)
-            self.assertTrue(track.size > 0)
 
         results, trap_power = calibrate_file(data_path)
         self.assertEqual(len(results), 2)
