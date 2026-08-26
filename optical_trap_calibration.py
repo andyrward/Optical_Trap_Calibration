@@ -9,11 +9,10 @@ an averaged PSD, and fits the aliased Lorentzian model implemented in
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import List
 
 import numpy as np
 from scipy.optimize import curve_fit
