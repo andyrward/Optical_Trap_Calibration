@@ -1,5 +1,7 @@
 # Optical Trap Calibration
 
+[![Build Executables](https://github.com/andyrward/Optical_Trap_Calibration/actions/workflows/build-executables.yml/badge.svg?branch=main)](https://github.com/andyrward/Optical_Trap_Calibration/actions/workflows/build-executables.yml)
+
 This repository contains a Python port of the MATLAB optical trap calibration code used to estimate trap stiffness from position traces using the aliased power spectrum method.
 
 ## Overview
@@ -106,20 +108,45 @@ To also display the PSD fit plot:
 python optical_trap_calibration.py --file path/to/your_data.dat --plot
 ```
 
-## Standalone executable build
+## Pre-built executables
 
-The repository includes `build_executable.py`, which calls PyInstaller.
+GitHub Actions automatically builds Windows and macOS executables.
+
+### Download options
+
+- **Actions artifacts**: open the [Build Executables workflow](https://github.com/andyrward/Optical_Trap_Calibration/actions/workflows/build-executables.yml) and download the latest artifact from a workflow run.
+- **GitHub Releases**: when a tag such as `v1.0.0` is pushed, the workflow creates a release and attaches the executables.
+
+### Trigger a new build
+
+- Click **Run workflow** on the Actions page for a manual build.
+- Push Python changes to `main`.
+- Create and push a release tag that matches `v*.*.*`.
+
+### Platform notes
+
+- **Windows**: Windows Defender or SmartScreen may warn the first time you run an unsigned executable.
+- **macOS**: If Gatekeeper warns about an unsigned app, right-click the file and choose **Open** the first time.
+
+## Local standalone executable build
+
+To build locally, use the provided helper script:
 
 ```bash
 python build_executable.py
 ```
 
-This creates a standalone executable in the `dist/` folder.
+This creates a standalone executable in the `dist/` folder using PyInstaller.
 
-Notes:
+### Verifying the executable
 
-- On Windows and macOS, the app is best built with `--windowed` so it launches as a desktop application.
-- The executable can be distributed to users without requiring them to install Python or the scientific packages.
+- Run the executable and open a calibration data file.
+- Confirm the trap power and stiffness values are displayed.
+- For the example dataset, run:
+
+```bash
+python optical_trap_calibration.py --file example_data/example_trap_data.dat --plot
+```
 
 ## Example data files
 

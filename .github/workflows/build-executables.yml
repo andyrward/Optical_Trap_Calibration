@@ -1,0 +1,102 @@
+name: Build Executables
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "requirements.txt"
+  create:
+
+jobs:
+  build:
+    # Run for manual dispatches, main-branch pushes, and release-tag creation.
+    if: github.event_name != 'create' || (github.event.ref_type == 'tag' && startsWith(github.event.ref, 'v'))
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            source_executable: dist/optical_trap_calibration.exe
+            artifact_name: optical-trap-calibration-windows.exe
+          - os: macos-latest
+            source_executable: dist/optical_trap_calibration
+            artifact_name: optical-trap-calibration-macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller==6.22.2
+
+      - name: Build executable
+        run: >
+          python -m PyInstaller
+          --onefile
+          --windowed
+          --name optical_trap_calibration
+          optical_trap_calibration.py
+
+      - name: Package executable artifact
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "${{ matrix.source_executable }}" "release-assets/${{ matrix.artifact_name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release-assets/${{ matrix.artifact_name }}
+          retention-days: 30
+
+  publish-release:
+    # Attach the platform binaries to a GitHub Release when a v* tag is created.
+    if: github.event_name == 'create' && github.event.ref_type == 'tag' && startsWith(github.event.ref, 'v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: optical-trap-calibration-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          body: |
+            ## Pre-built executables
+
+            Download the platform-specific executable from this release or from the Actions artifacts.
+
+            - Windows: `optical-trap-calibration-windows.exe`
+            - macOS: `optical-trap-calibration-macos`
+
+            ## Usage notes
+
+            - Windows may prompt for permission the first time you run the executable.
+            - macOS may show an unsigned app warning; right-click the app or executable and choose **Open** the first time.

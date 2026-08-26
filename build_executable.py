@@ -21,16 +21,11 @@ def main() -> None:
         "-m",
         "PyInstaller",
         "--onefile",
+        "--windowed",
         "--name",
-        "OpticalTrapCalibration",
-        "--noconsole",
+        "optical_trap_calibration",
         str(APP_PATH),
     ]
-
-    if sys.platform == "darwin":
-        cmd.insert(5, "--windowed")
-    elif sys.platform.startswith("win"):
-        cmd.insert(5, "--windowed")
 
     subprocess.run(cmd, check=True, cwd=str(ROOT))
     print("\nStandalone package created in the dist/ directory.")
