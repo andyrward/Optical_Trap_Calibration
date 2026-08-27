@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Optical Trap Calibration</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-2: #273449;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #22d3ee;
+      --border: #334155;
+      --ok: #4ade80;
+      --err: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 80% -10%, #1e293b 0%, var(--bg) 60%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 28px 32px 8px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    header h1 { margin: 0; font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
+    header p { margin: 6px 0 0; color: var(--muted); font-size: 0.95rem; }
+    main { max-width: 1100px; margin: 0 auto; padding: 16px 32px 48px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      margin-top: 18px;
+    }
+    form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    label { display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem; color: var(--muted); }
+    select, button {
+      font: inherit;
+      padding: 9px 12px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+    }
+    select { min-width: 280px; }
+    button {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      border: none;
+      color: #08233a;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 9px 18px;
+    }
+    button:hover { filter: brightness(1.08); }
+    .error {
+      background: rgba(248,113,113,0.12);
+      border: 1px solid rgba(248,113,113,0.4);
+      color: var(--err);
+      padding: 12px 14px;
+      border-radius: 10px;
+      margin-top: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+    }
+    .meta { color: var(--accent); font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    td.num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .plot { margin-top: 18px; text-align: center; }
+    .plot img { max-width: 100%; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+    .hint { color: var(--muted); font-size: 0.82rem; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Optical Trap Calibration</h1>
+    <p>Aliased power-spectrum fitting for trap stiffness estimation — Python port of the MATLAB code.</p>
+  </header>
+
+  <main>
+    <div class="card">
+      <form method="get" action="/">
+        <label for="file">Calibration data file
+          <select name="file" id="file">
+            <option value="" {% if not selected %}selected{% endif %}>— select a file —</option>
+            {% for name in files %}
+            <option value="{{ name }}" {% if selected == name %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit">Run calibration</button>
+      </form>
+      <p class="hint">Files come from <code>example_data/</code>. Each needs a companion <code>_Voltage.dat</code> holding the trap power in mW.</p>
+    </div>
+
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+
+    {% if results %}
+    <div class="card">
+      <p class="meta">Trap power: {{ trap_power }} mW</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Track</th>
+            <th>γ (drag)</th>
+            <th>Corner freq. fc (Hz)</th>
+            <th>Stiffness k (pN/nm)</th>
+            <th>k / mW (pN/nm/mW)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in results %}
+          <tr>
+            <td>{{ r.track_index }}</td>
+            <td class="num">{{ "%.3e" | format(r.gamma) }}</td>
+            <td class="num">{{ "%.2f" | format(r.corner_frequency_hz) }}</td>
+            <td class="num">{{ "%.4f" | format(r.stiffness_pn_per_nm) }}</td>
+            <td class="num">{{ "%.3e" | format(r.stiffness_per_mw) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="plot">
+        <img alt="Averaged PSD and fitted aliased Lorentzian" src="data:image/png;base64,{{ plot_b64 }}">
+      </div>
+    </div>
+    {% endif %}
+  </main>
+</body>
+</html>
