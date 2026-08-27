@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import base64
 import io
+import shutil
+import tempfile
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from flask import Flask, render_template, request
+from werkzeug.utils import secure_filename
 
 from optical_trap_calibration import calibrate_file
 
@@ -77,6 +80,10 @@ def index():
     elif selected:
         error = f"File not found: {selected}"
 
+    return _render_results_page(files, selected, results, trap_power, error, plot_b64)
+
+
+def _render_results_page(files, selected, results, trap_power, error, plot_b64):
     return render_template(
         "index.html",
         files=files,
@@ -86,6 +93,42 @@ def index():
         error=error,
         plot_b64=plot_b64,
     )
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    files = list_calibration_files()
+    data_storage = request.files.get("data")
+    voltage_storage = request.files.get("voltage")
+    results = None
+    trap_power = None
+    error = None
+    plot_b64 = None
+    selected = ""
+
+    if not data_storage or not data_storage.filename:
+        error = "Please choose a data file."
+    elif not voltage_storage or not voltage_storage.filename:
+        error = "Please choose the companion _Voltage.dat file as well."
+    else:
+        tmpdir = Path(tempfile.mkdtemp(prefix="otc_"))
+        try:
+            data_name = secure_filename(data_storage.filename)
+            data_path = tmpdir / data_name
+            data_storage.save(str(data_path))
+            # Save the voltage file under the companion name calibrate_file() expects.
+            voltage_path = tmpdir / f"{data_path.stem}_Voltage.dat"
+            voltage_storage.save(str(voltage_path))
+            selected = data_name
+            try:
+                results, trap_power = calibrate_file(data_path)
+                plot_b64 = render_plot(results)
+            except Exception as exc:  # surface calibration errors to the page
+                error = str(exc)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return _render_results_page(files, selected, results, trap_power, error, plot_b64)
 
 
 if __name__ == "__main__":
