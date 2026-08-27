@@ -18,7 +18,7 @@ def filtpsdaliased(x, xdata):
     for i, fi in enumerate(f):
         total = 0.0
         for j in range(-40, 41):
-            freq_term = fi + j * f_nyquist
+            freq_term = fi + (j - 1) * f_nyquist
             denominator = (np.pi ** 2) * gamma * ((freq_term ** 2) + (fc ** 2))
             total += (kt / denominator) * (np.sinc(freq_term * et)) ** 2
         spectrum[i] = total
