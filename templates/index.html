@@ -40,9 +40,9 @@
       padding: 20px 22px;
       margin-top: 18px;
     }
-    form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    form { display: flex; flex-direction: column; gap: 14px; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem; color: var(--muted); }
-    select, button {
+    select, input[type=file], input[type=number] {
       font: inherit;
       padding: 9px 12px;
       border-radius: 9px;
@@ -51,25 +51,21 @@
       color: var(--text);
     }
     select { min-width: 280px; }
+    input[type=file] { max-width: 340px; }
+    input[type=file]::file-selector-button {
+      font: inherit; margin-right: 10px; padding: 7px 12px; border: none; border-radius: 7px;
+      background: var(--panel); color: var(--accent); cursor: pointer; font-weight: 600;
+    }
     button {
       background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      border: none;
-      color: #08233a;
-      font-weight: 700;
-      cursor: pointer;
-      padding: 9px 18px;
+      border: none; color: #08233a; font-weight: 700; cursor: pointer;
+      padding: 10px 22px; border-radius: 9px; font-size: 0.95rem; align-self: flex-start;
     }
     button:hover { filter: brightness(1.08); }
     .error {
-      background: rgba(248,113,113,0.12);
-      border: 1px solid rgba(248,113,113,0.4);
-      color: var(--err);
-      padding: 12px 14px;
-      border-radius: 10px;
-      margin-top: 16px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 0.85rem;
-      white-space: pre-wrap;
+      background: rgba(248,113,113,0.12); border: 1px solid rgba(248,113,113,0.4);
+      color: var(--err); padding: 12px 14px; border-radius: 10px; margin-top: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; white-space: pre-wrap;
     }
     .meta { color: var(--accent); font-weight: 600; }
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
@@ -79,18 +75,38 @@
     .plot { margin-top: 18px; text-align: center; }
     .plot img { max-width: 100%; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
     .hint { color: var(--muted); font-size: 0.82rem; margin-top: 10px; }
-    .upload-form input[type=file] {
-      font: inherit; padding: 8px; border-radius: 9px; border: 1px solid var(--border);
-      background: var(--panel-2); color: var(--text); max-width: 340px;
-    }
-    .upload-form input[type=file]::file-selector-button {
-      font: inherit; margin-right: 10px; padding: 7px 12px; border: none; border-radius: 7px;
-      background: var(--panel); color: var(--accent); cursor: pointer; font-weight: 600;
-    }
-    .card h2 { margin: 0 0 14px; font-size: 1.05rem; font-weight: 600; }
     .or-divider { display: flex; align-items: center; gap: 12px; color: var(--muted);
-      font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 22px 0 2px; }
+      font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; }
     .or-divider::before, .or-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+    .form-row { display: flex; flex-wrap: wrap; gap: 14px; }
+    .form-row label { flex: 1; min-width: 200px; }
+    details.advanced-params { margin-top: 4px; }
+    details.advanced-params > summary {
+      cursor: pointer; font-size: 0.85rem; font-weight: 600; color: var(--accent);
+      padding: 8px 0; user-select: none; list-style: none;
+    }
+    details.advanced-params > summary::-webkit-details-marker { display: none; }
+    details.advanced-params > summary::before { content: "▸ "; }
+    details.advanced-params[open] > summary::before { content: "▾ "; }
+    .params-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px; padding: 14px 0 4px;
+    }
+    .params-grid label { font-size: 0.76rem; }
+    .params-grid input[type=number] { padding: 7px 10px; font-size: 0.85rem; }
+    .params-summary {
+      display: flex; flex-wrap: wrap; gap: 14px; margin-top: 6px;
+      font-size: 0.78rem; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .params-summary span {
+      background: var(--panel-2); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+    }
+    .results-header { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+    .card h2 { margin: 0 0 14px; font-size: 1.05rem; font-weight: 600; }
+    @media (max-width: 700px) {
+      .form-row { flex-direction: column; }
+      select { min-width: unset; }
+    }
   </style>
 </head>
 <body>
@@ -101,33 +117,76 @@
 
   <main>
     <div class="card">
-      <form method="get" action="/">
-        <label for="file">Calibration data file
-          <select name="file" id="file">
-            <option value="" {% if not selected %}selected{% endif %}>— select a file —</option>
+      <form method="post" action="/calibrate" enctype="multipart/form-data">
+        <label for="example_file">Calibration data file
+          <select name="example_file" id="example_file">
+            <option value="">— select an example file —</option>
             {% for name in files %}
             <option value="{{ name }}" {% if selected == name %}selected{% endif %}>{{ name }}</option>
             {% endfor %}
           </select>
         </label>
+
+        <div class="or-divider">or upload your own files</div>
+
+        <div class="form-row">
+          <label>Data file (.dat)
+            <input type="file" name="data" accept=".dat,.txt,.csv,.tsv">
+          </label>
+          <label>Companion voltage file (_Voltage.dat)
+            <input type="file" name="voltage" accept=".dat,.txt,.csv,.tsv">
+          </label>
+        </div>
+
+        <details class="advanced-params">
+          <summary>Advanced Parameters</summary>
+          <div class="params-grid">
+            <label title="Number of PSD blocks to average (more = smoother but needs more data)">
+              PSD blocks
+              <input type="number" name="blocks" value="{{ params.blocks }}" min="2" max="512">
+            </label>
+            <label title="Frequencies below this are excluded from the fit (Hz)">
+              Low-freq cutoff (Hz)
+              <input type="number" name="low_freq_cutoff" value="{{ params.low_freq_cutoff }}" min="0" step="0.1">
+            </label>
+            <label title="Lower edge of the notch band to exclude (Hz)">
+              Notch low (Hz)
+              <input type="number" name="notch_low" value="{{ params.notch_low }}" min="0" step="0.1">
+            </label>
+            <label title="Upper edge of the notch band to exclude (Hz)">
+              Notch high (Hz)
+              <input type="number" name="notch_high" value="{{ params.notch_high }}" min="0" step="0.1">
+            </label>
+            <label title="Initial guess for drag coefficient γ">
+              Initial γ
+              <input type="number" name="x0_0" value="{{ params.x0_0 }}" step="1e-7">
+            </label>
+            <label title="Initial guess for corner frequency fc (Hz)">
+              Initial fc (Hz)
+              <input type="number" name="x0_1" value="{{ params.x0_1 }}" step="1">
+            </label>
+            <label title="Lower bound for drag coefficient γ">
+              Lower bound γ
+              <input type="number" name="lb_0" value="{{ params.lb_0 }}" step="1e-8">
+            </label>
+            <label title="Lower bound for corner frequency fc (Hz)">
+              Lower bound fc
+              <input type="number" name="lb_1" value="{{ params.lb_1 }}" step="1">
+            </label>
+            <label title="Upper bound for drag coefficient γ">
+              Upper bound γ
+              <input type="number" name="ub_0" value="{{ params.ub_0 }}" step="1e-6">
+            </label>
+            <label title="Upper bound for corner frequency fc (Hz)">
+              Upper bound fc
+              <input type="number" name="ub_1" value="{{ params.ub_1 }}" step="10">
+            </label>
+          </div>
+        </details>
+
         <button type="submit">Run calibration</button>
       </form>
-      <p class="hint">Files come from <code>example_data/</code>. Each needs a companion <code>_Voltage.dat</code> holding the trap power in mW.</p>
-    </div>
-
-    <div class="or-divider">or open your own files</div>
-
-    <div class="card">
-      <form method="post" action="/upload" enctype="multipart/form-data" class="upload-form">
-        <label>Data file (.dat)
-          <input type="file" name="data" accept=".dat,.txt,.csv,.tsv" required>
-        </label>
-        <label>Companion voltage file (_Voltage.dat)
-          <input type="file" name="voltage" accept=".dat,.txt,.csv,.tsv" required>
-        </label>
-        <button type="submit">Run calibration</button>
-      </form>
-      <p class="hint">Browse to a local data file and its companion <code>_Voltage.dat</code> (the trap power in mW), then run the calibration.</p>
+      <p class="hint">Example files come from <code>example_data/</code>. Each needs a companion <code>_Voltage.dat</code> holding the trap power in mW. Adjust the advanced parameters to fine-tune the fit.</p>
     </div>
 
     {% if error %}
@@ -136,7 +195,15 @@
 
     {% if results %}
     <div class="card">
-      <p class="meta">Trap power: {{ trap_power }} mW</p>
+      <div class="results-header">
+        <p class="meta">Trap power: {{ trap_power }} mW</p>
+        <div class="params-summary">
+          <span>blocks={{ params.blocks }}</span>
+          <span>low-cut={{ params.low_freq_cutoff }} Hz</span>
+          <span>notch={{ params.notch_low }}–{{ params.notch_high }} Hz</span>
+          <span>γ₀={{ params.x0_0 }}, fc₀={{ params.x0_1 }}</span>
+        </div>
+      </div>
       <table>
         <thead>
           <tr>

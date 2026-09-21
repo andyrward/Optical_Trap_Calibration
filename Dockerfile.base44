@@ -3,11 +3,14 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Scientific stack (from requirements.txt, minus build-only pyinstaller) + Flask web view.
+# Scientific stack + FastAPI web view (from requirements.txt, minus build-only pyinstaller).
 RUN pip install --no-cache-dir \
     "numpy>=1.26,<3.0" \
     "scipy>=1.11,<2.0" \
     "matplotlib>=3.8,<4.0" \
-    "flask>=3.0,<4.0"
+    "fastapi>=0.115,<1.0" \
+    "uvicorn[standard]>=0.30,<1.0" \
+    "jinja2>=3.1,<4.0" \
+    "python-multipart>=0.0.9,<1.0"
 
 WORKDIR /app

@@ -188,12 +188,12 @@ def compute_averaged_psd(signal: np.ndarray, blocks: int = DEFAULT_BLOCKS) -> tu
     return freq, avg_psd, centered
 
 
-def _frequency_filter(freq: np.ndarray, avg_psd: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _frequency_filter(freq: np.ndarray, avg_psd: np.ndarray, low_freq_cutoff: float = 20.0, notch_low: float = 90.0, notch_high: float = 120.0) -> tuple[np.ndarray, np.ndarray]:
     if freq.size == 0:
         raise ValueError("No frequency points available for fitting.")
 
-    below_20hz = freq < 20.0
-    filter_mask = ((freq > 90.0) & (freq < 120.0)) | below_20hz
+    below_cutoff = freq < low_freq_cutoff
+    filter_mask = ((freq > notch_low) & (freq < notch_high)) | below_cutoff
     filter_mask[-1] = True
     filtered_freq = freq[~filter_mask]
     filtered_psd = avg_psd[~filter_mask]
@@ -205,11 +205,14 @@ def _frequency_filter(freq: np.ndarray, avg_psd: np.ndarray) -> tuple[np.ndarray
     return filtered_freq, filtered_psd
 
 
-def fit_aliased_psd(freq: np.ndarray, avg_psd: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    freq_filt, avg_psd_filt = _frequency_filter(freq, avg_psd)
-    x0 = np.array([2e-5, 100.0], dtype=float)
-    lb = np.array([1e-6, 0.0], dtype=float)
-    ub = np.array([1e-4, 1000.0], dtype=float)
+def fit_aliased_psd(freq: np.ndarray, avg_psd: np.ndarray, x0: np.ndarray | None = None, lb: np.ndarray | None = None, ub: np.ndarray | None = None, low_freq_cutoff: float = 20.0, notch_low: float = 90.0, notch_high: float = 120.0) -> tuple[np.ndarray, np.ndarray, float]:
+    freq_filt, avg_psd_filt = _frequency_filter(freq, avg_psd, low_freq_cutoff, notch_low, notch_high)
+    if x0 is None:
+        x0 = np.array([2e-5, 100.0], dtype=float)
+    if lb is None:
+        lb = np.array([1e-6, 0.0], dtype=float)
+    if ub is None:
+        ub = np.array([1e-4, 1000.0], dtype=float)
 
     def fit_model(xdata: np.ndarray, gamma: float, fc: float) -> np.ndarray:
         return filtpsdaliased(np.array([gamma, fc], dtype=float), xdata)
@@ -231,7 +234,7 @@ def fit_aliased_psd(freq: np.ndarray, avg_psd: np.ndarray) -> tuple[np.ndarray, 
     return popt, fit_curve, stiffness
 
 
-def calibrate_file(filepath: str | os.PathLike[str]) -> tuple[list[dict], float]:
+def calibrate_file(filepath: str | os.PathLike[str], blocks: int = DEFAULT_BLOCKS, low_freq_cutoff: float = 20.0, notch_low: float = 90.0, notch_high: float = 120.0, x0: np.ndarray | None = None, lb: np.ndarray | None = None, ub: np.ndarray | None = None) -> tuple[list[dict], float]:
     path = Path(filepath)
     tracks = load_position_data(path)
     voltage_path = path.with_name(f"{path.stem}_Voltage.dat")
@@ -243,8 +246,8 @@ def calibrate_file(filepath: str | os.PathLike[str]) -> tuple[list[dict], float]
 
     results: list[dict] = []
     for index, track in enumerate(tracks, start=1):
-        freq, avg_psd, _ = compute_averaged_psd(track, blocks=DEFAULT_BLOCKS)
-        params, fit_curve, stiffness = fit_aliased_psd(freq, avg_psd)
+        freq, avg_psd, _ = compute_averaged_psd(track, blocks=blocks)
+        params, fit_curve, stiffness = fit_aliased_psd(freq, avg_psd, x0=x0, lb=lb, ub=ub, low_freq_cutoff=low_freq_cutoff, notch_low=notch_low, notch_high=notch_high)
         results.append(
             {
                 "track_index": index,
