@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Thin web view for the optical trap calibration tool.
+"""FastAPI web app for optical trap calibration with adjustable parameters.
 
 Reuses the calibration functions from ``optical_trap_calibration.py`` unchanged.
 The original Tkinter desktop GUI is still available locally via
-``python optical_trap_calibration.py``; this module only adds a browser-facing
-view so the tool can be used inside the Base44 preview.
+``python optical_trap_calibration.py``.
 """
 from __future__ import annotations
 
@@ -13,19 +12,36 @@ import io
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from flask import Flask, render_template, request
-from werkzeug.utils import secure_filename
+import numpy as np
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 
 from optical_trap_calibration import calibrate_file
 
-app = Flask(__name__)
+app = FastAPI(title="Optical Trap Calibration")
+templates = Jinja2Templates(directory="templates")
 
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_DIRS = [REPO_ROOT / "example_data", REPO_ROOT]
+
+DEFAULT_PARAMS = {
+    "blocks": 64,
+    "low_freq_cutoff": 20.0,
+    "notch_low": 90.0,
+    "notch_high": 120.0,
+    "x0_0": 2e-5,
+    "x0_1": 100.0,
+    "lb_0": 1e-6,
+    "lb_1": 0.0,
+    "ub_0": 1e-4,
+    "ub_1": 1000.0,
+}
 
 
 def list_calibration_files() -> dict[str, Path]:
@@ -62,74 +78,124 @@ def render_plot(results: list[dict]) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-@app.route("/")
-def index():
+def _calibration_params(
+    blocks: int, low_freq_cutoff: float, notch_low: float, notch_high: float,
+    x0_0: float, x0_1: float, lb_0: float, lb_1: float, ub_0: float, ub_1: float,
+) -> dict:
+    """Build the kwargs dict for calibrate_file from individual form fields."""
+    return {
+        "blocks": blocks,
+        "low_freq_cutoff": low_freq_cutoff,
+        "notch_low": notch_low,
+        "notch_high": notch_high,
+        "x0": np.array([x0_0, x0_1], dtype=float),
+        "lb": np.array([lb_0, lb_1], dtype=float),
+        "ub": np.array([ub_0, ub_1], dtype=float),
+    }
+
+
+def _template_params(
+    blocks: int, low_freq_cutoff: float, notch_low: float, notch_high: float,
+    x0_0: float, x0_1: float, lb_0: float, lb_1: float, ub_0: float, ub_1: float,
+) -> dict:
+    """Build the params dict for template rendering (flat, no numpy arrays)."""
+    return {
+        "blocks": blocks,
+        "low_freq_cutoff": low_freq_cutoff,
+        "notch_low": notch_low,
+        "notch_high": notch_high,
+        "x0_0": x0_0,
+        "x0_1": x0_1,
+        "lb_0": lb_0,
+        "lb_1": lb_1,
+        "ub_0": ub_0,
+        "ub_1": ub_1,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
     files = list_calibration_files()
-    selected = request.args.get("file", "")
-    results = None
-    trap_power = None
-    error = None
-    plot_b64 = None
-
-    if selected and selected in files:
-        try:
-            results, trap_power = calibrate_file(files[selected])
-            plot_b64 = render_plot(results)
-        except Exception as exc:  # surface calibration errors to the page
-            error = str(exc)
-    elif selected:
-        error = f"File not found: {selected}"
-
-    return _render_results_page(files, selected, results, trap_power, error, plot_b64)
+    return templates.TemplateResponse(request, "index.html", {
+        "files": files,
+        "params": DEFAULT_PARAMS,
+        "selected": "",
+    })
 
 
-def _render_results_page(files, selected, results, trap_power, error, plot_b64):
-    return render_template(
-        "index.html",
-        files=files,
-        selected=selected,
-        results=results,
-        trap_power=trap_power,
-        error=error,
-        plot_b64=plot_b64,
+@app.post("/calibrate", response_class=HTMLResponse)
+async def calibrate(
+    request: Request,
+    example_file: str = Form(""),
+    data: Optional[UploadFile] = File(None),
+    voltage: Optional[UploadFile] = File(None),
+    blocks: int = Form(64),
+    low_freq_cutoff: float = Form(20.0),
+    notch_low: float = Form(90.0),
+    notch_high: float = Form(120.0),
+    x0_0: float = Form(2e-5),
+    x0_1: float = Form(100.0),
+    lb_0: float = Form(1e-6),
+    lb_1: float = Form(0.0),
+    ub_0: float = Form(1e-4),
+    ub_1: float = Form(1000.0),
+):
+    files = list_calibration_files()
+    cal_params = _calibration_params(
+        blocks, low_freq_cutoff, notch_low, notch_high,
+        x0_0, x0_1, lb_0, lb_1, ub_0, ub_1,
     )
-
-
-@app.route("/upload", methods=["POST"])
-def upload():
-    files = list_calibration_files()
-    data_storage = request.files.get("data")
-    voltage_storage = request.files.get("voltage")
+    tmpl_params = _template_params(
+        blocks, low_freq_cutoff, notch_low, notch_high,
+        x0_0, x0_1, lb_0, lb_1, ub_0, ub_1,
+    )
     results = None
     trap_power = None
     error = None
     plot_b64 = None
     selected = ""
 
-    if not data_storage or not data_storage.filename:
-        error = "Please choose a data file."
-    elif not voltage_storage or not voltage_storage.filename:
-        error = "Please choose the companion _Voltage.dat file as well."
-    else:
+    use_upload = data is not None and data.filename and voltage is not None and voltage.filename
+
+    if use_upload:
         tmpdir = Path(tempfile.mkdtemp(prefix="otc_"))
         try:
-            data_name = secure_filename(data_storage.filename)
+            data_name = Path(data.filename).name
             data_path = tmpdir / data_name
-            data_storage.save(str(data_path))
-            # Save the voltage file under the companion name calibrate_file() expects.
+            data_path.write_bytes(await data.read())
             voltage_path = tmpdir / f"{data_path.stem}_Voltage.dat"
-            voltage_storage.save(str(voltage_path))
+            voltage_path.write_bytes(await voltage.read())
             selected = data_name
             try:
-                results, trap_power = calibrate_file(data_path)
+                results, trap_power = calibrate_file(data_path, **cal_params)
                 plot_b64 = render_plot(results)
-            except Exception as exc:  # surface calibration errors to the page
+            except Exception as exc:
                 error = str(exc)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+    elif example_file and example_file in files:
+        selected = example_file
+        try:
+            results, trap_power = calibrate_file(files[example_file], **cal_params)
+            plot_b64 = render_plot(results)
+        except Exception as exc:
+            error = str(exc)
+    elif example_file:
+        error = f"File not found: {example_file}"
+    else:
+        error = "Please select an example file or upload your own data and voltage files."
 
-    return _render_results_page(files, selected, results, trap_power, error, plot_b64)
+    return templates.TemplateResponse(request, "index.html", {
+        "files": files,
+        "params": tmpl_params,
+        "selected": selected,
+        "results": results,
+        "trap_power": trap_power,
+        "error": error,
+        "plot_b64": plot_b64,
+    })
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000, debug=True, use_reloader=True)
+    import uvicorn
+    uvicorn.run("web_app:app", host="0.0.0.0", port=3000, reload=True)

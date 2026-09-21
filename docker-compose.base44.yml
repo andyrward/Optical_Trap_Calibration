@@ -6,12 +6,8 @@ services:
     container_name: optical_trap_calibration
     working_dir: /app
     volumes:
-      # Bind-mount the source so edits apply on restart (no live reload for Tkinter).
+      # Bind-mount the source so edits hot-reload via uvicorn --reload.
       - ./:/app
     ports:
-      # noVNC web client, served to the preview.
       - "3000:3000"
-    environment:
-      - DISPLAY=:0
     command: ["bash", "/app/start.base44.sh"]
-    tty: true
