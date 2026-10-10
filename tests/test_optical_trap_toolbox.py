@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -32,6 +33,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertEqual(len(runs), 6)
         self.assertEqual(len(inferred), 6)
         self.assertEqual(inferred[0].label, "tether_attempt_or_contact")
+        self.assertEqual(inferred[1].label, "reference_pull")
         self.assertEqual(inferred[2].label, "force_extension")
         self.assertEqual(inferred[3].label, "force_extension_subtether")
         self.assertEqual(inferred[4].label, "oscillator_mode_three")
@@ -51,6 +53,35 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertEqual(trace["position_2_nm"].shape[0], expected_length)
         self.assertTrue(np.isfinite(trace["power_mw"]).all())
         self.assertTrue(np.isfinite(trace["voltage_v"]).all())
+
+    def test_parse_stateful_six_column_layout(self):
+        data = np.array(
+            [
+                [0.0, 10.0, 2.0, 5.0, 0.3, 21.0],
+                [1.0, 11.0, 3.0, 6.0, 0.4, 21.0],
+                [2.0, 12.0, 4.0, 7.0, 0.5, 24.0],
+                [3.0, 13.0, 5.0, 8.0, 0.6, 24.0],
+                [4.0, 14.0, 6.0, 9.0, 0.7, 27.0],
+            ],
+            dtype=float,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "stateful_6col.dat"
+            np.savetxt(path, data, delimiter="\t")
+            trace = load_normalized_trace(path)
+
+        self.assertEqual(trace["extension_nm"].tolist(), [10.0, 11.0, 12.0, 13.0, 14.0])
+        self.assertEqual(trace["force_pn"].tolist(), [2.0, 3.0, 4.0, 5.0, 6.0])
+        self.assertEqual(trace["voltage_v"].tolist(), [5.0, 6.0, 7.0, 8.0, 9.0])
+        self.assertEqual(trace["stiffness_pn_per_nm"].tolist(), [0.3, 0.4, 0.5, 0.6, 0.7])
+        self.assertEqual(trace["state_code"].astype(int).tolist(), [21, 21, 24, 24, 27])
+
+    def test_segment_state_runs_ignores_nan_values(self):
+        states = np.array([np.nan, 21.0, 21.0, np.nan, 24.0, 24.0, np.nan], dtype=float)
+
+        runs = segment_state_runs(states)
+
+        self.assertEqual([(run.start_idx, run.end_idx, run.state_code) for run in runs], [(1, 2, 21), (4, 5, 24)])
 
     def test_plot_helpers_return_figures(self):
         matplotlib.use("Agg")
