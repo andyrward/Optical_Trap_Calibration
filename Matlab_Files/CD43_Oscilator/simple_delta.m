@@ -1,0 +1,29 @@
+function [dz,sdz] = simple_delta(z,Navg,right,left)
+%simple_delta Computes the delta between the average of two regions seperated by left and
+%righte indices, If points are too close to edge then Navg is discarded
+%   Detailed explanation goes here
+
+
+     if left-Navg>=1
+
+         zb=(z(left-Navg:left));
+
+     else
+
+         zb=z(1:left);
+
+     end
+
+     if right+Navg<=numel(z)
+         za=(z(right:right+Navg));
+
+     else
+         za=z(right:end);
+
+     end
+     
+     dz=mean(za)-mean(zb);
+     sdz=sqrt((std(zb))^2/numel(zb)+(std(za))^2/numel(za));
+
+
+end

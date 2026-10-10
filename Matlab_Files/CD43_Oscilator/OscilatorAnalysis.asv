@@ -1,0 +1,99 @@
+%% Open Data
+
+[data,fp] = fx_OT_Qick_Process_Plot_Cal();
+
+
+td = array2table(data,'VariableNames',{'t','z','F','V','k','State'});
+
+%% segment data
+
+[ramp, wait] = segment_regions(td.State');
+
+%%
+sz=size(ramp);
+N=sz(1);
+Smax=100; % region must be larger than Smax
+sd=size(wait);
+figure;
+c=1;
+i=1;
+while c==1
+   
+    ri=ramp(i,:);
+    ru1=ri(1);
+    ru2=ri(2);
+
+    if i<=sd(1)
+        rwu=wait(i,:);
+        rwu1=rwu(1);
+        rwu2=rwu(2);
+    else
+        rwu=0;
+    end
+
+    tu=td.t(ru1:ru2);
+    Fu=td.F(ru1:ru2);
+    zu=td.z(ru1:ru2);
+
+    if rwu~=0
+        tw=td.t(rwu1:rwu2);
+        Fw=td.F(rwu1:rwu2);
+        zw=td.z(rwu1:rwu2);
+    end
+
+    in=i+1;
+
+    if in<=N
+        ri=ramp(in,:);
+        rd1=ri(1);
+        rd2=ri(2);
+        
+        tdn=td.t(rd1:rd2);
+        Fdn=td.F(rd1:rd2);
+        zdn=td.z(rd1:rd2);
+
+    else
+        c=0;
+    end
+
+
+
+  subplot(3,1,1);
+  hold off;
+  plot(tu,Fu,'DisplayName',"Ramp Up");
+  xlabel('time(sec)');
+  ylabel('Force(pN)');
+  set(gca,'FontSize',15);
+  if rwu~=0
+      hold on;
+      plot(tw,Fw,'DisplayName',"Wait High Force");
+
+  end
+  if c==1
+      plot(tdn,Fdn,'DisplayName',"Ramp Down");
+  end
+
+legend
+
+subplot(3,1,2);
+hold off;
+
+plot(zu,Fu,'DisplayName',"Ramp Up");
+xlabel('Extension(nm)');
+ylabel('Force(pN)');
+set(gca,'FontSize',15);
+
+ if c==1
+     hold on;
+      plot(zdn,Fdn,'DisplayName',"Ramp Down");
+      xlim([500,max(zdn)*1.2]);
+      ylim([0,max(Fdna)*1.2])
+  end
+
+c=0;
+end
+
+
+
+
+

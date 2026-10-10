@@ -1,0 +1,96 @@
+function [d_out,d_err,zu_out] = dynamic_delta(zu,zdn,Fu,Fdn,Lds,Lss,Nblock,jump,fig_h,Fmeasure)
+%UNTITLED6 Summary of this function goes here
+%   Detailed explanation goes here
+
+figure(fig_h);
+K=600;
+lp=50;
+lps=1;
+Fmin=20;
+Fp=1:0.1:40;
+ep=WLC_Caliper(Lds,50,Fp,K,Lss,1);
+epL=WLC_ext(Lds,50,Fp,600);
+
+
+[zu,dzu]=block_average(zu,Nblock);
+[Fu,dFu]=block_average(Fu,Nblock);
+[zdn,dzdn]=block_average(zdn,Nblock);
+[Fdn,dFdn]=block_average(Fdn,Nblock);
+
+dF=diff(Fu);
+f=find(dF<=jump);
+if ~isempty(f)
+fz=f(1)
+zu=zu(1:fz);
+dzu=dzu(1:fz);
+Fu=Fu(1:fz);
+end
+
+%%
+subplot(1,3,1);
+
+hold off;
+
+c_ul=[0.85,0.33,0.1];
+c_l=[0,0.45,0.74];
+plot(zu,Fu,'o','DisplayName',"Ramp Up","Color",c_l);
+hold on;
+plot(zdn,Fdn,'o','DisplayName',"Ramp Down","Color",c_ul);
+
+
+% Fit line to high force region.
+f=find(Fu>=Fmin);
+[pu,su]=polyfit(Fu(f),zu(f),1);
+[zu_s,dzu_s]=polyval(pu,Fpoly,su);
+Fpoly=Fmin:0.1:Fmeasure;
+
+
+plot(zu_s,Fpoly,'DisplayName',"Ramp_Up - Spline",'LineWidth',2,"Color",c_l);
+
+f=find(Fu>=Fmin);
+[pdn,sdn]=polyfit(Fu(f),zdn(f),1);
+[zdn_s,dzdn_s]=polyval(pdn,Fpoly,sdn);
+
+plot(zdn_s,Fpoly,'DisplayName',"Ramp_Down - Spline",'LineWidth',1,"Color",c_ul);
+xlabel("Extension(nm)");
+ylabel("Force(pN)");
+set(gca,'FontSize',15);
+
+f10=find(Fpoly==20);
+shift=zdn_s(f10)-ep(f10);
+ep=ep+shift;
+epL=epL+shift;
+
+plot(ep,Fp,"-",'DisplayName',"WLC UnLooped",'LineWidth',2,"Color",c_ul);
+plot(epL,Fp,"-",'DisplayName',"WLC Looped Zero Target",'LineWidth',2,"Color",c_l);
+
+subplot(1,3,2);
+
+hold off;
+dz_exp=zdn_s-zu_s;
+dz_th=ep-epL;
+hold off;
+plot(Fpoly,dz_exp,'o','DisplayName',"Experiment");
+hold on;
+plot(Fp,dz_th,'DisplayName',"Zero Target Delta");
+xlabel("Force (pN)");
+ylabel("delta (nm)",'LineWidth',2)
+set(gca,'FontSize',15);
+legend;
+subplot(1,3,3);
+f=find(Fp>=20)
+d=dz_th(f)-dz_exp;
+plot(Fp,d,'o');
+xlabel("Force (pN)");
+ylabel("distance (nm)",'LineWidth',2)
+set(gca,'FontSize',15);
+
+fm=find(Fp==Fmeasure);
+d_out=d(end)
+d_err=sqrt(dzu_s(end))
+fm=find(Fp==37.9);
+zu_out=mean(zdn_s(fm-10:fm+10));
+
+end
+
+

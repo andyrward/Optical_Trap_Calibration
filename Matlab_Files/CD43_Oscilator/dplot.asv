@@ -1,0 +1,19 @@
+% Assuming d_all is your array of measurements
+% Assuming derr_all is your array of error estimates
+
+% Sort the measurements and keep track of the sorting order
+[d_sorted, sortIdx] = sort(d_all);
+
+% Sort the error estimates based on the same sorting order
+derr_sorted = derr_all(sortIdx);
+
+% Create a y-axis vector for vertical separation
+y_values = 1:length(d_sorted);
+
+% Create the error bar plot
+figure;
+errorbar(d_sorted, y_values, derr_sorted/sqrt(20), 'horizontal', 'o');
+
+% Label the axes
+xlabel('distance(nm)');
+ylabel('Measurement Index');

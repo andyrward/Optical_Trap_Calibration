@@ -1,0 +1,48 @@
+%% Open Data
+
+[data,fp] = fx_OT_Qick_Process_Plot_Cal();
+
+
+td = array2table(data,'VariableNames',{'t','z','F','V','k','State'});
+
+%% Segment Data on Measuring Voltage
+Vmeasure=6.2;
+
+Measure = find_Vmeasure_segments(td.V', Vmeasure);
+
+%% Compute Deltas
+Nblock=20;
+fig_l=figure;
+jump=70;
+delta=[];
+sdelta=[];
+for i=1:numel(Measure)
+
+m=Measure{1};
+m1=m(1);
+m2=m(2);
+z=td.z(m1:m2);
+t=td.t(m1:m2);
+figure(fig_l);
+
+hold off;
+plot(z);
+xlabel("time (sec)");
+ylabel("Extension (nm)");
+set(gca,'FontSize',15);
+[m,delta,pv,hv] = RunningStep(z,Nblock,10,0,'left');
+f=find(delta>=jump);
+ip=m(f);
+hold on;
+plot(ip,z(ip),'go','MarkerFaceColor','g');
+
+ analyze=input("Step Good (1=yes) :" );
+
+ if analyze==1
+ 
+ end
+
+pause();
+
+
+end
