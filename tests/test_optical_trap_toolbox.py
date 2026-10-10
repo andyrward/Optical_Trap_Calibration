@@ -6,6 +6,9 @@ import matplotlib
 import numpy as np
 
 from optical_trap_toolbox import (
+    build_state_report,
+    export_state_report_csv,
+    export_state_report_json,
     infer_experiment_segments,
     load_normalized_trace,
     plot_force_extension,
@@ -82,6 +85,48 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         runs = segment_state_runs(states)
 
         self.assertEqual([(run.start_idx, run.end_idx, run.state_code) for run in runs], [(1, 2, 21), (4, 5, 24)])
+
+    def test_state_report_build_and_exports(self):
+        trace = {
+            "time_s": np.linspace(0.0, 9.0, 10),
+            "state_code": np.array([21, 21, 24, 24, 27, 27, 31, 31, 3, 4], dtype=int),
+        }
+        report = build_state_report(trace)
+
+        self.assertEqual(report["total_states"], 6)
+        self.assertEqual(report["total_runs"], 5)
+        self.assertEqual(report["summary"][0]["label"], "tether_attempt_or_contact")
+        self.assertEqual(report["summary"][0]["run_count"], 1)
+        self.assertAlmostEqual(report["summary"][0]["total_duration_s"], 1.0)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "state_summary.csv"
+            json_path = Path(temp_dir) / "state_summary.json"
+            export_state_report_csv(report["summary"], csv_path)
+            export_state_report_json(report["summary"], json_path)
+
+            self.assertTrue(csv_path.exists())
+            self.assertTrue(json_path.exists())
+            self.assertIn("state_code", csv_path.read_text(encoding="utf-8"))
+            self.assertIn('"label": "tether_attempt_or_contact"', json_path.read_text(encoding="utf-8"))
+
+    def test_state_report_on_repo_sample_file(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        data_path = repo_root / "Matlab_Files" / "teterh1_target.dat"
+        if not data_path.exists():
+            self.skipTest(f"Sample file not available: {data_path}")
+
+        trace = load_normalized_trace(data_path)
+        report = build_state_report(trace)
+
+        self.assertGreaterEqual(report["total_runs"], 1)
+        self.assertGreater(len(report["state_runs"]), 0)
+        self.assertIn("state_code", report["state_runs"][0])
+        if report["summary"]:
+            first_state = report["summary"][0]
+            self.assertIn("label", first_state)
+            self.assertIn("confidence", first_state)
+            self.assertGreaterEqual(first_state["total_samples"], 1)
 
     def test_plot_helpers_return_figures(self):
         matplotlib.use("Agg")

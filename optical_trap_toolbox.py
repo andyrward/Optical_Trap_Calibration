@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import csv
+import json
 import re
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,6 +46,21 @@ class ExperimentSegment:
     run: StateRun
     label: str
     confidence: str
+
+
+@dataclass(frozen=True)
+class StateRunSummary:
+    state_code: int
+    label: str
+    confidence: str
+    run_count: int
+    total_samples: int
+    total_duration_s: float
+    fraction_of_trace: float
+    run_starts: list[int]
+    run_ends: list[int]
+    run_start_times_s: list[float]
+    run_end_times_s: list[float]
 
 
 def _load_numeric_table(filepath: str | Path) -> np.ndarray:
@@ -246,6 +263,197 @@ def infer_experiment_segments(state_codes: Sequence[float | int]) -> list[Experi
         confidence = "high" if run.state_code in STATE_CODE_HINTS else "low"
         segments.append(ExperimentSegment(run=run, label=label, confidence=confidence))
     return segments
+
+
+def summarize_state_runs(
+    trace: dict[str, np.ndarray],
+    *,
+    state_runs: Sequence[StateRun] | None = None,
+) -> list[StateRunSummary]:
+    """Summarize contiguous state runs by code, label, duration, and fraction of trace."""
+    time = np.asarray(trace.get("time_s", np.arange(trace["state_code"].size, dtype=float)))
+    state_codes = np.asarray(trace["state_code"], dtype=float)
+    runs = list(state_runs) if state_runs is not None else segment_state_runs(state_codes)
+    if not runs:
+        return []
+
+    full_duration = 0.0
+    if time.size > 1:
+        full_duration = float(time[-1] - time[0])
+    elif time.size == 1:
+        full_duration = 0.0
+
+    summary_by_code: dict[int, dict[str, Any]] = {}
+    for run in runs:
+        state_code = int(run.state_code)
+        label = STATE_CODE_HINTS.get(state_code, f"unknown_state_{state_code}")
+        confidence = "high" if state_code in STATE_CODE_HINTS else "low"
+        duration = 0.0
+        if run.start_idx < time.size and run.end_idx < time.size:
+            duration = float(time[run.end_idx] - time[run.start_idx])
+        if run.start_idx == run.end_idx and time.size > run.start_idx:
+            duration = 0.0
+        entry = summary_by_code.setdefault(
+            state_code,
+            {
+                "state_code": state_code,
+                "label": label,
+                "confidence": confidence,
+                "run_count": 0,
+                "total_samples": 0,
+                "total_duration_s": 0.0,
+                "run_starts": [],
+                "run_ends": [],
+                "run_start_times_s": [],
+                "run_end_times_s": [],
+            },
+        )
+        entry["run_count"] += 1
+        sample_count = max(run.end_idx - run.start_idx + 1, 0)
+        entry["total_samples"] += sample_count
+        entry["total_duration_s"] += duration
+        entry["run_starts"].append(run.start_idx)
+        entry["run_ends"].append(run.end_idx)
+        if time.size > run.start_idx:
+            entry["run_start_times_s"].append(float(time[run.start_idx]))
+        else:
+            entry["run_start_times_s"].append(float("nan"))
+        if time.size > run.end_idx:
+            entry["run_end_times_s"].append(float(time[run.end_idx]))
+        else:
+            entry["run_end_times_s"].append(float("nan"))
+
+    results: list[StateRunSummary] = []
+    for state_code, entry in sorted(summary_by_code.items()):
+        total_samples = int(entry["total_samples"])
+        total_duration = float(entry["total_duration_s"])
+        fraction = 0.0 if full_duration <= 0.0 else total_duration / full_duration
+        results.append(
+            StateRunSummary(
+                state_code=entry["state_code"],
+                label=entry["label"],
+                confidence=entry["confidence"],
+                run_count=int(entry["run_count"]),
+                total_samples=total_samples,
+                total_duration_s=total_duration,
+                fraction_of_trace=fraction,
+                run_starts=list(entry["run_starts"]),
+                run_ends=list(entry["run_ends"]),
+                run_start_times_s=list(entry["run_start_times_s"]),
+                run_end_times_s=list(entry["run_end_times_s"]),
+            )
+        )
+    return results
+
+
+def export_state_report_csv(summary: Sequence[StateRunSummary | dict[str, Any]], path: str | Path):
+    path = Path(path)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "state_code",
+                "label",
+                "confidence",
+                "run_count",
+                "total_samples",
+                "total_duration_s",
+                "fraction_of_trace",
+            ]
+        )
+        for item in summary:
+            if isinstance(item, dict):
+                record = item
+            else:
+                record = {
+                    "state_code": item.state_code,
+                    "label": item.label,
+                    "confidence": item.confidence,
+                    "run_count": item.run_count,
+                    "total_samples": item.total_samples,
+                    "total_duration_s": item.total_duration_s,
+                    "fraction_of_trace": item.fraction_of_trace,
+                }
+            writer.writerow(
+                [
+                    record["state_code"],
+                    record["label"],
+                    record["confidence"],
+                    record["run_count"],
+                    record["total_samples"],
+                    record["total_duration_s"],
+                    record["fraction_of_trace"],
+                ]
+            )
+
+
+def export_state_report_json(summary: Sequence[StateRunSummary | dict[str, Any]], path: str | Path):
+    path = Path(path)
+    payload = []
+    for item in summary:
+        if isinstance(item, dict):
+            record = item
+        else:
+            record = {
+                "state_code": item.state_code,
+                "label": item.label,
+                "confidence": item.confidence,
+                "run_count": item.run_count,
+                "total_samples": item.total_samples,
+                "total_duration_s": item.total_duration_s,
+                "fraction_of_trace": item.fraction_of_trace,
+                "run_starts": item.run_starts,
+                "run_ends": item.run_ends,
+                "run_start_times_s": item.run_start_times_s,
+                "run_end_times_s": item.run_end_times_s,
+            }
+        payload.append(record)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def build_state_report(trace: dict[str, np.ndarray], *, include_runs: bool = True) -> dict[str, Any]:
+    state_runs = segment_state_runs(trace["state_code"])
+    summary = summarize_state_runs(trace, state_runs=state_runs)
+    time = np.asarray(trace.get("time_s", np.arange(trace["state_code"].size, dtype=float)))
+    details: list[dict[str, Any]] = []
+    for run in state_runs:
+        start_time = float("nan")
+        end_time = float("nan")
+        if time.size > run.start_idx:
+            start_time = float(time[run.start_idx])
+        if time.size > run.end_idx:
+            end_time = float(time[run.end_idx])
+        details.append(
+            {
+                "start_idx": run.start_idx,
+                "end_idx": run.end_idx,
+                "state_code": run.state_code,
+                "label": STATE_CODE_HINTS.get(run.state_code, f"unknown_state_{run.state_code}"),
+                "confidence": "high" if run.state_code in STATE_CODE_HINTS else "low",
+                "start_time_s": start_time,
+                "end_time_s": end_time,
+            }
+        )
+    report: dict[str, Any] = {
+        "state_runs": details,
+        "summary": [
+            {
+                "state_code": item.state_code,
+                "label": item.label,
+                "confidence": item.confidence,
+                "run_count": item.run_count,
+                "total_samples": item.total_samples,
+                "total_duration_s": item.total_duration_s,
+                "fraction_of_trace": item.fraction_of_trace,
+            }
+            for item in summary
+        ],
+        "total_states": len(summary),
+        "total_runs": len(state_runs),
+    }
+    if include_runs:
+        report["runs"] = report["state_runs"]
+    return report
 
 
 def plot_state_vs_time(trace: dict[str, np.ndarray], segments: Iterable[StateRun] | None = None):
