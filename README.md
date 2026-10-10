@@ -164,6 +164,38 @@ You can test the app with:
 python optical_trap_calibration.py --file example_data/example_trap_data.dat --plot
 ```
 
+## Optical Trap Toolbox (wrangling foundation)
+
+This repository now includes a first-pass wrangling module:
+
+- `optical_trap_toolbox.py`
+
+It focuses on reusable data loading and segmentation before deeper physics analysis:
+
+- normalize text traces into a consistent column schema:
+  - `time_s, position_1_nm, position_2_nm, extension_nm, force_pn, voltage_v, stiffness_pn_per_nm, state_code, power_mw`
+- support MATLAB-style calibration files and stateful six-column traces (`t, z, F, V, k, State`)
+- ingest companion `_Voltage.dat` files (including repeated MATLAB alternating value streams) and align power/voltage arrays to trace length
+- segment contiguous state runs with the same approach as `StateFinder.m`
+- infer likely experiment phase labels from known state codes
+- generate plotting summaries for:
+  - state vs time
+  - power/voltage vs time
+  - force/extension overlays
+  - segment boundaries
+
+### State-code assumptions (v0)
+
+The inferred labels are based on existing MATLAB code paths and are intentionally conservative:
+
+- `21` → `tether_attempt_or_contact` (inferred from DualTrap workflow context)
+- `24` → `reference_pull` (from `StateFinder(24, ...)` usage in `TetherDataLoad.m`)
+- `27` → `force_extension` (from FE extraction in `TetherDataLoad.m`)
+- `31` → `force_extension_subtether` (paired with FE logic in `TetherDataLoad.m`)
+- `3` / `4` → oscillator mode regions (from `segment_regions.m`)
+
+Unknown state codes are preserved and labeled as `unknown_state_<code>` until mapped.
+
 ## Packaging notes
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
