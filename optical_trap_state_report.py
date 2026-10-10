@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -16,7 +17,6 @@ from optical_trap_toolbox import (
     StateRun,
     build_state_report,
     export_state_report_csv,
-    export_state_report_json,
     load_normalized_trace,
     plot_state_vs_time,
 )
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 "total_states": report.get("total_states", 0),
                 "total_runs": report.get("total_runs", 0),
             }
-            Path(args.json).write_text(__import__("json").dumps(report_payload, indent=2), encoding="utf-8")
+            Path(args.json).write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
             print(f"JSON export written to {args.json}")
         if args.plot:
             _save_plot(trace, report, args.plot)

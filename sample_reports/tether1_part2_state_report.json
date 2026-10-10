@@ -1,0 +1,38 @@
+{
+  "state_runs": [
+    {
+      "start_idx": 0,
+      "end_idx": 53945,
+      "state_code": 0,
+      "label": "unknown_state_0",
+      "confidence": "low",
+      "start_time_s": 0.0,
+      "end_time_s": 38.51819
+    }
+  ],
+  "summary": [
+    {
+      "state_code": 0,
+      "label": "unknown_state_0",
+      "confidence": "low",
+      "run_count": 1,
+      "total_samples": 53946,
+      "total_duration_s": 38.51819,
+      "fraction_of_trace": 1.0,
+      "run_starts": [
+        0
+      ],
+      "run_ends": [
+        53945
+      ],
+      "run_start_times_s": [
+        0.0
+      ],
+      "run_end_times_s": [
+        38.51819
+      ]
+    }
+  ],
+  "total_states": 1,
+  "total_runs": 1
+}

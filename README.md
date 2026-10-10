@@ -217,6 +217,15 @@ This loads a MATLAB-style trace (including its companion `_Voltage.dat` if prese
 
 The utility supports CSV and JSON export and can optionally save a state-vs-time plot. This is intended as a lightweight inspection layer on top of the existing wrangling functions; it does not replace the calibration physics analysis.
 
+Sample generated reports are included in the repository under `sample_reports/`:
+
+- `sample_reports/example_trap_data_state_report.json`
+- `sample_reports/example_trap_data_state_report.csv`
+- `sample_reports/tether1_part2_state_report.json`
+- `sample_reports/tether1_part2_state_report.csv`
+
+These show the output format for both an example trace with no detected discrete states and a MATLAB sample trace with a single detected run.
+
 ## Packaging notes
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
