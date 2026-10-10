@@ -30,6 +30,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         inferred = infer_experiment_segments(states)
 
         self.assertEqual(len(runs), 6)
+        self.assertEqual(len(inferred), 6)
         self.assertEqual(inferred[0].label, "tether_attempt_or_contact")
         self.assertEqual(inferred[2].label, "force_extension")
         self.assertEqual(inferred[3].label, "force_extension_subtether")
@@ -39,6 +40,8 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
     def test_parse_matlab_sample_with_voltage_companion(self):
         repo_root = Path(__file__).resolve().parents[1]
         data_path = repo_root / "Matlab_Files" / "cal_250mw.dat"
+        if not data_path.exists():
+            self.skipTest(f"Sample file not available: {data_path}")
 
         trace = load_normalized_trace(data_path)
 
@@ -60,7 +63,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
             "force_pn": np.linspace(0, 5, 10),
             "voltage_v": np.linspace(4, 6, 10),
             "stiffness_pn_per_nm": np.full(10, np.nan),
-            "state_code": np.array([21, 21, 24, 24, 27, 27, 31, 31, 3, 4], dtype=float),
+            "state_code": np.array([21, 21, 24, 24, 27, 27, 31, 31, 3, 4], dtype=int),
             "power_mw": np.linspace(100, 120, 10),
         }
         segments = segment_state_runs(trace["state_code"])

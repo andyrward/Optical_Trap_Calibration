@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-
-from optical_trap_calibration import load_voltage_file
 
 NORMALIZED_SCHEMA = (
     "time_s",
@@ -28,6 +27,7 @@ STATE_CODE_HINTS: dict[int, str] = {
     21: "tether_attempt_or_contact",
     24: "reference_pull",
     27: "force_extension",
+    # MATLAB DualTrap workflows treat state 31 as a second FE-like subtether run.
     31: "force_extension_subtether",
 }
 
@@ -72,21 +72,36 @@ def _load_voltage_power_series(filepath: str | Path) -> dict[str, np.ndarray]:
     if not text.strip():
         return {}
 
+    # MATLAB exports in this repository are ASCII decimal text with comma/space/tab/newline delimiters.
     normalized = text.replace("\n", ",").replace("\t", ",").replace(" ", ",")
     values = [token for token in normalized.split(",") if token]
-    try:
-        numeric = np.array([float(value) for value in values], dtype=float)
-    except ValueError:
-        numeric = np.array([load_voltage_file(path)], dtype=float)
-
-    if numeric.size == 0:
-        return {}
+    numeric_values: list[float] = []
+    for value in values:
+        try:
+            numeric_values.append(float(value))
+        except ValueError:
+            continue
+    if not numeric_values:
+        raise ValueError(f"Voltage file contains no numeric values: {path}")
+    numeric = np.array(numeric_values, dtype=float)
 
     if numeric.size == 1:
+        # Single token files are interpreted as scalar trap power only.
         return {"power_mw": numeric}
 
-    if numeric.size % 2 == 0:
-        return {"power_mw": numeric[0::2], "voltage_v": numeric[1::2]}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    per_line_counts = [
+        len([token for token in re.split(r"[,\t ]+", line) if token])
+        for line in lines
+    ]
+    looks_like_two_column_rows = bool(per_line_counts) and all(count == 2 for count in per_line_counts)
+    looks_like_single_line_stream = len(lines) == 1 and "," in lines[0]
+    alternating_stream = looks_like_two_column_rows or looks_like_single_line_stream
+    if alternating_stream and numeric.size % 2 == 0:
+        power_values = numeric[0::2]
+        voltage_values = numeric[1::2]
+        # MATLAB _Voltage.dat streams in this repository follow power,voltage ordering.
+        return {"power_mw": power_values, "voltage_v": voltage_values}
 
     return {"power_mw": numeric}
 
@@ -119,12 +134,16 @@ def load_normalized_trace(
     trace["time_s"] = data[:, 0]
 
     if n_cols == 6:
+        # MATLAB stateful layout: [t, z, F, V, k, State]. Position channels are not present.
         trace["extension_nm"] = data[:, 1]
         trace["force_pn"] = data[:, 2]
         trace["voltage_v"] = data[:, 3]
         trace["stiffness_pn_per_nm"] = data[:, 4]
         trace["state_code"] = data[:, 5]
     elif n_cols == 7:
+        # MATLAB two-trap layout used by existing calibration code:
+        # [time, left1, left2, right1, right2, voltage_or_const, state_or_const]
+        # Pairing follows the existing calibration loader convention: (left1,right1) and (left2,right2).
         trace["position_1_nm"] = (data[:, 1] + data[:, 3]) / 2.0
         trace["position_2_nm"] = (data[:, 2] + data[:, 4]) / 2.0
         trace["voltage_v"] = data[:, 5]
@@ -150,14 +169,14 @@ def load_normalized_trace(
         raise ValueError(f"Unsupported column count for {filepath}: {n_cols}")
 
     data_path = Path(filepath)
-    voltage_path = Path(companion_voltage_path) if companion_voltage_path else data_path.with_name(f"{data_path.stem}_Voltage.dat")
+    if companion_voltage_path is not None:
+        voltage_path = Path(companion_voltage_path)
+    else:
+        voltage_path = data_path.with_name(f"{data_path.stem}_Voltage.dat")
     if voltage_path.exists():
         series = _load_voltage_power_series(voltage_path)
         for key, values in series.items():
             trace[key] = _align_series(values, n_rows)
-
-    if np.all(np.isnan(trace["power_mw"])) and voltage_path.exists():
-        trace["power_mw"] = np.full(n_rows, load_voltage_file(voltage_path))
 
     return trace
 
@@ -197,6 +216,7 @@ def infer_experiment_segments(state_codes: Sequence[float | int]) -> list[Experi
 
 
 def plot_state_vs_time(trace: dict[str, np.ndarray], segments: Iterable[StateRun] | None = None):
+    """Plot state code versus time with optional segment boundary lines."""
     fig, ax = plt.subplots(figsize=(10, 3))
     time = trace["time_s"]
     state = trace["state_code"]
@@ -212,6 +232,7 @@ def plot_state_vs_time(trace: dict[str, np.ndarray], segments: Iterable[StateRun
 
 
 def plot_power_voltage(trace: dict[str, np.ndarray]):
+    """Plot voltage and power time series from a normalized trace."""
     fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
     time = trace["time_s"]
     axes[0].plot(time, trace["voltage_v"], lw=1.0)
@@ -223,31 +244,40 @@ def plot_power_voltage(trace: dict[str, np.ndarray]):
 
 
 def plot_force_extension(trace: dict[str, np.ndarray], segments: Iterable[StateRun] | None = None):
+    """Plot force-extension data and optional segment overlays."""
     fig, ax = plt.subplots(figsize=(6, 5))
     extension = trace["extension_nm"]
     force = trace["force_pn"]
     valid = ~(np.isnan(extension) | np.isnan(force))
     if np.any(valid):
         ax.plot(extension[valid], force[valid], lw=1.0)
+    indices = np.arange(extension.size)
     for run in segments or []:
-        run_mask = np.arange(extension.size)
-        run_mask = (run_mask >= run.start_idx) & (run_mask <= run.end_idx) & valid
+        run_mask = (indices >= run.start_idx) & (indices <= run.end_idx) & valid
         if np.any(run_mask):
             ax.plot(extension[run_mask], force[run_mask], lw=1.5)
     ax.set_xlabel("Extension (nm)")
     ax.set_ylabel("Force (pN)")
-    ax.set_title("Force/Extension")
+    ax.set_title("Force-Extension")
     return fig
 
 
 def plot_segment_boundaries(trace: dict[str, np.ndarray], segments: Sequence[StateRun]):
+    """Plot contiguous state-run boundaries across time."""
     fig, ax = plt.subplots(figsize=(10, 3))
     time = trace["time_s"]
-    y = np.zeros_like(time)
-    ax.plot(time, y, alpha=0.0)
+    if time.size:
+        ax.set_xlim(time[0], time[-1])
     for run in segments:
         ax.axvspan(time[run.start_idx], time[run.end_idx], alpha=0.2)
-        ax.text(time[run.start_idx], 0.02, str(run.state_code), rotation=90, va="bottom")
+        ax.text(
+            time[run.start_idx],
+            0.02,
+            str(run.state_code),
+            rotation=90,
+            va="bottom",
+            transform=ax.get_xaxis_transform(),
+        )
     ax.set_yticks([])
     ax.set_xlabel("Time (s)")
     ax.set_title("Segment boundaries")
