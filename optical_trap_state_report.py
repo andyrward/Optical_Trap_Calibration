@@ -8,9 +8,7 @@ from pathlib import Path
 import sys
 
 import matplotlib
-
-if not sys.platform.startswith("win") and not sys.stdout.isatty():
-    matplotlib.use("Agg")
+matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
@@ -48,7 +46,7 @@ def format_state_report(report: dict) -> str:
         state_code = run["state_code"]
         start_time = run.get("start_time_s")
         end_time = run.get("end_time_s")
-        if start_time is None:
+        if start_time is None or end_time is None:
             time_desc = f"idx {start_idx}-{end_idx}"
         else:
             time_desc = f"idx {start_idx}-{end_idx}; time {start_time:.3f}s to {end_time:.3f}s"
@@ -68,7 +66,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Summarize contiguous state runs in an optical trap trace.")
     parser.add_argument("--file", required=True, help="Path to a trace file to load and summarize.")
     parser.add_argument("--csv", help="Optional CSV output path for per-state summary.")
-    parser.add_argument("--json", help="Optional JSON output path for the full report.")
+    parser.add_argument("--json", help="Optional JSON output path for the per-state summary export.")
     parser.add_argument(
         "--plot",
         nargs="?",
@@ -90,7 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             export_state_report_csv(report["summary"], args.csv)
             print(f"CSV export written to {args.csv}")
         if args.json:
-            export_state_report_json(report["summary"], args.json)
+            report_payload = {
+                "state_runs": report.get("state_runs", []),
+                "summary": report.get("summary", []),
+                "total_states": report.get("total_states", 0),
+                "total_runs": report.get("total_runs", 0),
+            }
+            Path(args.json).write_text(__import__("json").dumps(report_payload, indent=2), encoding="utf-8")
             print(f"JSON export written to {args.json}")
         if args.plot:
             _save_plot(trace, report, args.plot)

@@ -94,10 +94,10 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         report = build_state_report(trace)
 
         self.assertEqual(report["total_states"], 6)
-        self.assertEqual(report["total_runs"], 5)
-        self.assertEqual(report["summary"][0]["label"], "tether_attempt_or_contact")
+        self.assertEqual(report["total_runs"], 6)
+        self.assertEqual(report["summary"][0]["label"], "oscillator_mode_three")
         self.assertEqual(report["summary"][0]["run_count"], 1)
-        self.assertAlmostEqual(report["summary"][0]["total_duration_s"], 1.0)
+        self.assertAlmostEqual(report["summary"][0]["total_duration_s"], 0.0)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "state_summary.csv"

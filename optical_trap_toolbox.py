@@ -57,10 +57,16 @@ class StateRunSummary:
     total_samples: int
     total_duration_s: float
     fraction_of_trace: float
-    run_starts: list[int]
-    run_ends: list[int]
-    run_start_times_s: list[float]
-    run_end_times_s: list[float]
+    run_starts: tuple[int, ...]
+    run_ends: tuple[int, ...]
+    run_start_times_s: tuple[float, ...]
+    run_end_times_s: tuple[float, ...]
+
+
+def _resolve_state_label_and_confidence(state_code: int) -> tuple[str, str]:
+    label = STATE_CODE_HINTS.get(state_code, f"unknown_state_{state_code}")
+    confidence = "high" if state_code in STATE_CODE_HINTS else "low"
+    return label, confidence
 
 
 def _load_numeric_table(filepath: str | Path) -> np.ndarray:
@@ -259,8 +265,7 @@ def segment_state_runs(state_codes: Sequence[float | int], state_code: int | Non
 def infer_experiment_segments(state_codes: Sequence[float | int]) -> list[ExperimentSegment]:
     segments: list[ExperimentSegment] = []
     for run in segment_state_runs(state_codes):
-        label = STATE_CODE_HINTS.get(run.state_code, f"unknown_state_{run.state_code}")
-        confidence = "high" if run.state_code in STATE_CODE_HINTS else "low"
+        label, confidence = _resolve_state_label_and_confidence(run.state_code)
         segments.append(ExperimentSegment(run=run, label=label, confidence=confidence))
     return segments
 
@@ -272,7 +277,7 @@ def summarize_state_runs(
 ) -> list[StateRunSummary]:
     """Summarize contiguous state runs by code, label, duration, and fraction of trace."""
     time = np.asarray(trace.get("time_s", np.arange(trace["state_code"].size, dtype=float)))
-    state_codes = np.asarray(trace["state_code"], dtype=float)
+    state_codes = np.asarray(trace["state_code"])
     runs = list(state_runs) if state_runs is not None else segment_state_runs(state_codes)
     if not runs:
         return []
@@ -280,19 +285,14 @@ def summarize_state_runs(
     full_duration = 0.0
     if time.size > 1:
         full_duration = float(time[-1] - time[0])
-    elif time.size == 1:
-        full_duration = 0.0
 
     summary_by_code: dict[int, dict[str, Any]] = {}
     for run in runs:
         state_code = int(run.state_code)
-        label = STATE_CODE_HINTS.get(state_code, f"unknown_state_{state_code}")
-        confidence = "high" if state_code in STATE_CODE_HINTS else "low"
+        label, confidence = _resolve_state_label_and_confidence(state_code)
         duration = 0.0
         if run.start_idx < time.size and run.end_idx < time.size:
             duration = float(time[run.end_idx] - time[run.start_idx])
-        if run.start_idx == run.end_idx and time.size > run.start_idx:
-            duration = 0.0
         entry = summary_by_code.setdefault(
             state_code,
             {
@@ -337,10 +337,10 @@ def summarize_state_runs(
                 total_samples=total_samples,
                 total_duration_s=total_duration,
                 fraction_of_trace=fraction,
-                run_starts=list(entry["run_starts"]),
-                run_ends=list(entry["run_ends"]),
-                run_start_times_s=list(entry["run_start_times_s"]),
-                run_end_times_s=list(entry["run_end_times_s"]),
+                run_starts=tuple(entry["run_starts"]),
+                run_ends=tuple(entry["run_ends"]),
+                run_start_times_s=tuple(entry["run_start_times_s"]),
+                run_end_times_s=tuple(entry["run_end_times_s"]),
             )
         )
     return results
@@ -423,19 +423,20 @@ def build_state_report(trace: dict[str, np.ndarray], *, include_runs: bool = Tru
             start_time = float(time[run.start_idx])
         if time.size > run.end_idx:
             end_time = float(time[run.end_idx])
+        label, confidence = _resolve_state_label_and_confidence(run.state_code)
         details.append(
             {
                 "start_idx": run.start_idx,
                 "end_idx": run.end_idx,
                 "state_code": run.state_code,
-                "label": STATE_CODE_HINTS.get(run.state_code, f"unknown_state_{run.state_code}"),
-                "confidence": "high" if run.state_code in STATE_CODE_HINTS else "low",
+                "label": label,
+                "confidence": confidence,
                 "start_time_s": start_time,
                 "end_time_s": end_time,
             }
         )
     report: dict[str, Any] = {
-        "state_runs": details,
+        "state_runs": details if include_runs else [],
         "summary": [
             {
                 "state_code": item.state_code,
@@ -445,14 +446,16 @@ def build_state_report(trace: dict[str, np.ndarray], *, include_runs: bool = Tru
                 "total_samples": item.total_samples,
                 "total_duration_s": item.total_duration_s,
                 "fraction_of_trace": item.fraction_of_trace,
+                "run_starts": list(item.run_starts),
+                "run_ends": list(item.run_ends),
+                "run_start_times_s": list(item.run_start_times_s),
+                "run_end_times_s": list(item.run_end_times_s),
             }
             for item in summary
         ],
         "total_states": len(summary),
         "total_runs": len(state_runs),
     }
-    if include_runs:
-        report["runs"] = report["state_runs"]
     return report
 
 
