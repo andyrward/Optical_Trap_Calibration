@@ -1,0 +1,2 @@
+state_code,label,confidence,run_count,total_samples,total_duration_s,fraction_of_trace
+0,unknown_state_0,low,1,53946,38.51819,1.0

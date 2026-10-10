@@ -196,6 +196,36 @@ The inferred labels are based on existing MATLAB code paths and are intentionall
 
 Unknown state codes are preserved and labeled as `unknown_state_<code>` until mapped.
 
+## State report utility
+
+The toolbox also includes a small report utility for inspecting contiguous state runs in a trace file:
+
+```bash
+python optical_trap_state_report.py --file Matlab_Files/tether1_part2.dat --csv state_report.csv --json state_report.json --plot state_report.png
+```
+
+This loads a MATLAB-style trace (including its companion `_Voltage.dat` if present), normalizes it to the standard schema, segments contiguous runs using the same logic as `StateFinder.m`, and prints a human-readable summary such as:
+
+- state code
+- inferred label
+- confidence
+- number of runs
+- total samples
+- total duration in seconds
+- fraction of the full trace
+- run boundaries (start/end index and time)
+
+The utility supports CSV and JSON export and can optionally save a state-vs-time plot. This is intended as a lightweight inspection layer on top of the existing wrangling functions; it does not replace the calibration physics analysis.
+
+Sample generated reports are included in the repository under `sample_reports/`:
+
+- `sample_reports/example_trap_data_state_report.json`
+- `sample_reports/example_trap_data_state_report.csv`
+- `sample_reports/tether1_part2_state_report.json`
+- `sample_reports/tether1_part2_state_report.csv`
+
+These show the output format for both an example trace with no detected discrete states and a MATLAB sample trace with a single detected run.
+
 ## Packaging notes
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
