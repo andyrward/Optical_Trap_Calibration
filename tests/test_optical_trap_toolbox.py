@@ -185,7 +185,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertIn("pulls", report)
         self.assertEqual(report["pulls"]["n_pulls"], 2)
 
-
+    def test_plot_helpers_return_figures(self):
         matplotlib.use("Agg")
         time = np.arange(10, dtype=float)
         trace = {
