@@ -545,7 +545,7 @@ def _assign_fe_cycles(phase: np.ndarray) -> np.ndarray:
     Since ``force_extension`` is detected per-run (each state-27 run is its
     own segment), all samples in the segment get cycle 1.
     """
-    cycle = np.ones(len(phase), dtype=object)
+    cycle = np.ones(len(phase), dtype=np.intp)
     return cycle
 
 
@@ -673,7 +673,7 @@ def label_cycles(
             int_arr = pd.array(raw_cycle, dtype=pd.Int64Dtype())
             finite_mask = ~int_arr.isna()
             if finite_mask.any():
-                raw_int = np.where(np.array(finite_mask), raw_cycle.astype(float), np.nan)
+                raw_int = np.array(int_arr, dtype=float)
                 max_in_seg = int(np.nanmax(raw_int)) if not np.all(np.isnan(raw_int)) else 0
                 shifted_int = np.where(np.array(finite_mask), raw_int + cycle_offset, np.nan)
                 cycle_offset += max_in_seg
