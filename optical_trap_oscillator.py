@@ -19,9 +19,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -249,6 +246,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import matplotlib
+    matplotlib.use("Agg")
+
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 

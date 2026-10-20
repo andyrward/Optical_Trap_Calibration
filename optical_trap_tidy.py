@@ -3,7 +3,7 @@
 
 Public API
 ----------
-load_tidy(path, k_mW=None, cal_file=None, k_per_mw=None) -> pd.DataFrame
+load_tidy(path, k_mW=None, cal_file=None, k_per_mw=None, *, source=None) -> pd.DataFrame
     Load a single run as a tidy DataFrame with one row per sample.
 
 find_routine_segments(df) -> pd.DataFrame
