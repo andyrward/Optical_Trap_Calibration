@@ -3,7 +3,7 @@
 
 Public API
 ----------
-load_tidy(path, cal_file=None, k_per_mw=None, *, k_mW=None, source=None) -> pd.DataFrame
+load_tidy(path, k_mW=None, cal_file=None, k_per_mw=None, *, source=None) -> pd.DataFrame
     Load a single run as a tidy DataFrame with one row per sample.
     ``k_per_mw`` (or the deprecated alias ``k_mW``) sets trap-1 stiffness in
     pN/nm/mW; pass ``cal_file`` for a JSON/YAML calibration file instead.
@@ -346,7 +346,7 @@ class OscillatorMode(ModeSpec):
             return r.state_code in (OSCILLATOR_RAMP_STATE, OSCILLATOR_HOLD_STATE)
 
         def _is_glitch(r) -> bool:
-            return (r.end_idx - r.start_idx) < _MIN_PATTERN_SAMPLES
+            return (r.end_idx - r.start_idx + 1) < _MIN_PATTERN_SAMPLES
 
         filtered: list = []
         for r in all_runs:
