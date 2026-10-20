@@ -19,8 +19,11 @@ NORMALIZED_SCHEMA = (
     "voltage_v",
     "stiffness_pn_per_nm",
     "state_code",
+    "actuation_state_code",
     "power_mw",
 )
+
+FORCE_EXTENSION_STATE = 27
 
 
 STATE_CODE_HINTS: dict[int, str] = {
@@ -175,13 +178,14 @@ def load_normalized_trace(
         trace["stiffness_pn_per_nm"] = data[:, 4]
         trace["state_code"] = data[:, 5]
     elif n_cols == 7:
-        # MATLAB two-trap layout used by existing calibration code:
-        # [time, trap1_a, trap2_a, trap1_b, trap2_b, voltage_or_const, state_or_const]
+        # MATLAB two-trap layout:
+        # [time, trap1_a, trap2_a, trap1_b, trap2_b, primary_state, actuation_state]
         # Pairing follows the repo convention: trap1 = mean(col1, col3) and trap2 = mean(col2, col4).
+        # Power/voltage for these files come exclusively from the companion _Voltage.dat.
         trace["position_1_nm"] = (data[:, 1] + data[:, 3]) / 2.0
         trace["position_2_nm"] = (data[:, 2] + data[:, 4]) / 2.0
-        trace["voltage_v"] = data[:, 5]
-        trace["state_code"] = data[:, 6]
+        trace["state_code"] = data[:, 5]
+        trace["actuation_state_code"] = data[:, 6]
         trace["extension_nm"] = trace["position_1_nm"] - trace["position_2_nm"]
     elif n_cols >= 2:
         positions = data[:, 1:]
@@ -268,6 +272,70 @@ def infer_experiment_segments(state_codes: Sequence[float | int]) -> list[Experi
         label, confidence = _resolve_state_label_and_confidence(run.state_code)
         segments.append(ExperimentSegment(run=run, label=label, confidence=confidence))
     return segments
+
+
+def _run_duration(time: np.ndarray, run: StateRun) -> float:
+    """Return duration of a single state run.
+
+    A single-sample run gets one sample period instead of 0 s.
+    """
+    start = run.start_idx
+    end = run.end_idx
+    if start == end:
+        # Single-sample run: use the gap to the next sample if available,
+        # otherwise the gap from the previous sample.
+        if end + 1 < time.size:
+            return float(time[end + 1] - time[end])
+        if start > 0:
+            return float(time[start] - time[start - 1])
+        return 0.0
+    return float(time[end] - time[start])
+
+
+def summarize_pulls(
+    trace: dict[str, np.ndarray],
+    pull_state: int = FORCE_EXTENSION_STATE,
+) -> dict[str, Any]:
+    """Find every contiguous run of *pull_state* and return a summary dict.
+
+    Returns
+    -------
+    dict with keys:
+        n_pulls         – number of contiguous pull runs
+        pulls           – list of {start_time_s, end_time_s, duration_s} per pull
+        gaps            – list of {states, duration_s} for the inter-pull gaps
+    """
+    time = np.asarray(trace.get("time_s", np.arange(trace["state_code"].size, dtype=float)))
+    all_runs = segment_state_runs(trace["state_code"])
+    pull_runs = [r for r in all_runs if r.state_code == pull_state]
+
+    pulls: list[dict[str, Any]] = []
+    for r in pull_runs:
+        pulls.append(
+            {
+                "start_time_s": float(time[r.start_idx]) if r.start_idx < time.size else float("nan"),
+                "end_time_s": float(time[r.end_idx]) if r.end_idx < time.size else float("nan"),
+                "duration_s": _run_duration(time, r),
+            }
+        )
+
+    gaps: list[dict[str, Any]] = []
+    for i in range(len(pull_runs) - 1):
+        gap_start_idx = pull_runs[i].end_idx + 1
+        gap_end_idx = pull_runs[i + 1].start_idx - 1
+        gap_states = [
+            r.state_code
+            for r in all_runs
+            if r.start_idx >= gap_start_idx and r.end_idx <= gap_end_idx
+        ]
+        gap_duration = 0.0
+        if gap_start_idx <= gap_end_idx and gap_end_idx < time.size:
+            gap_duration = float(time[gap_end_idx] - time[gap_start_idx])
+            if gap_start_idx == gap_end_idx and gap_end_idx + 1 < time.size:
+                gap_duration = float(time[gap_end_idx + 1] - time[gap_end_idx])
+        gaps.append({"states": gap_states, "duration_s": gap_duration})
+
+    return {"n_pulls": len(pull_runs), "pulls": pulls, "gaps": gaps}
 
 
 def summarize_state_runs(
@@ -436,6 +504,7 @@ def build_state_report(trace: dict[str, np.ndarray], *, include_runs: bool = Tru
             }
         )
     report: dict[str, Any] = {
+        "pulls": summarize_pulls(trace),
         "state_runs": details if include_runs else [],
         "summary": [
             {

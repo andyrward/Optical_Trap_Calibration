@@ -6,6 +6,7 @@ import matplotlib
 import numpy as np
 
 from optical_trap_toolbox import (
+    FORCE_EXTENSION_STATE,
     build_state_report,
     export_state_report_csv,
     export_state_report_json,
@@ -16,6 +17,7 @@ from optical_trap_toolbox import (
     plot_segment_boundaries,
     plot_state_vs_time,
     segment_state_runs,
+    summarize_pulls,
 )
 
 
@@ -127,6 +129,61 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
             self.assertIn("label", first_state)
             self.assertIn("confidence", first_state)
             self.assertGreaterEqual(first_state["total_samples"], 1)
+
+    def test_parse_seven_column_primary_and_actuation_states(self):
+        # 7-column layout: [t, t1a, t2a, t1b, t2b, primary_state, actuation_state]
+        data = np.array(
+            [
+                [0.0, 5001.0, 18874.0, 8313.0, 16085.0, 7.0, 0.0],
+                [1.0, 5002.0, 18875.0, 8314.0, 16086.0, 21.0, 3.0],
+                [2.0, 5003.0, 18876.0, 8315.0, 16087.0, 27.0, 5.0],
+            ],
+            dtype=float,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "seven_col.dat"
+            np.savetxt(path, data, delimiter=" ")
+            trace = load_normalized_trace(path)
+
+        np.testing.assert_array_equal(trace["state_code"].astype(int), [7, 21, 27])
+        np.testing.assert_array_equal(trace["actuation_state_code"].astype(int), [0, 3, 5])
+        # voltage/power should be NaN (no companion file present)
+        self.assertTrue(np.all(np.isnan(trace["voltage_v"])))
+        self.assertTrue(np.all(np.isnan(trace["power_mw"])))
+
+    def test_force_extension_pull_count_and_intervals(self):
+        # Build a trace: state 21, then 3 pulls (state 27) separated by state 24.
+        # Pull durations span 3 samples; gaps span 2 samples.
+        dt = 0.01
+        states = np.array(
+            [21, 21, 27, 27, 27, 24, 24, 27, 27, 27, 24, 27, 27, 27, 21],
+            dtype=int,
+        )
+        n = len(states)
+        time = np.arange(n, dtype=float) * dt
+        trace = {"time_s": time, "state_code": states.astype(float)}
+
+        result = summarize_pulls(trace, pull_state=FORCE_EXTENSION_STATE)
+
+        self.assertEqual(result["n_pulls"], 3)
+        self.assertEqual(len(result["pulls"]), 3)
+        self.assertAlmostEqual(result["pulls"][0]["start_time_s"], 0.02)
+        self.assertAlmostEqual(result["pulls"][0]["end_time_s"], 0.04)
+        self.assertAlmostEqual(result["pulls"][0]["duration_s"], 0.02)
+        self.assertAlmostEqual(result["pulls"][1]["start_time_s"], 0.07)
+        self.assertAlmostEqual(result["pulls"][2]["start_time_s"], 0.11)
+        self.assertEqual(len(result["gaps"]), 2)
+        self.assertIn(24, result["gaps"][0]["states"])
+        self.assertIn(24, result["gaps"][1]["states"])
+
+    def test_build_state_report_includes_pulls(self):
+        trace = {
+            "time_s": np.linspace(0.0, 9.0, 10),
+            "state_code": np.array([21, 21, 27, 27, 24, 24, 27, 27, 31, 31], dtype=float),
+        }
+        report = build_state_report(trace)
+        self.assertIn("pulls", report)
+        self.assertEqual(report["pulls"]["n_pulls"], 2)
 
     def test_plot_helpers_return_figures(self):
         matplotlib.use("Agg")
