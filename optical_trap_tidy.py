@@ -346,7 +346,8 @@ class OscillatorMode(ModeSpec):
             return r.state_code in (OSCILLATOR_RAMP_STATE, OSCILLATOR_HOLD_STATE)
 
         def _is_glitch(r) -> bool:
-            return (r.end_idx - r.start_idx + 1) < _MIN_PATTERN_SAMPLES
+            sample_count = r.end_idx - r.start_idx + 1
+            return sample_count < _MIN_PATTERN_SAMPLES
 
         filtered: list = []
         for r in all_runs:
@@ -879,10 +880,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.output and frames:
         all_df = pd.concat(frames, ignore_index=True)
         out = Path(args.output)
-        if out.suffix == ".parquet":
-            all_df.to_parquet(out, index=False)
-        else:
-            all_df.to_csv(out, index=False)
+        try:
+            if out.suffix == ".parquet":
+                all_df.to_parquet(out, index=False)
+            else:
+                all_df.to_csv(out, index=False)
+        except ImportError as exc:
+            print(
+                f"Error writing {out}: {exc}. Install pyarrow to enable .parquet output.",
+                file=sys.stderr,
+            )
+            return 1
         print(f"\nTidy output written to {out}")
 
     return 0
