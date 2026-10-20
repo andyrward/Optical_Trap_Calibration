@@ -9,7 +9,7 @@ load_tidy(path, k_mW=None, cal_file=None, k_per_mw=None, *, source=None) -> pd.D
 find_routine_segments(df) -> pd.DataFrame
     Annotate ``mode`` column using the registered mode detectors.
 
-label_cycles(df, dv_dt_threshold=0.1, smooth_window=50) -> pd.DataFrame
+label_cycles(df, dv_dt_threshold=0.0003, smooth_window=200) -> pd.DataFrame
     Annotate ``cycle``, ``phase``, and ``setpoint_v`` columns.
 
 apply_valid_mask(df, spike_threshold_nm=1000.0) -> pd.DataFrame
@@ -799,8 +799,8 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
 
     return {
         "source": source,
-        "n_force_extension_pulls": int(n_fe_pulls) if n_fe_pulls else 0,
-        "n_oscillator_cycles": int(n_osc_cycles) if n_osc_cycles else 0,
+        "n_force_extension_pulls": int(n_fe_pulls) if pd.notna(n_fe_pulls) and n_fe_pulls else 0,
+        "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
     }
 
 
