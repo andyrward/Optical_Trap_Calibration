@@ -3,8 +3,10 @@
 
 Public API
 ----------
-load_tidy(path, k_mW=None, cal_file=None, k_per_mw=None, *, source=None) -> pd.DataFrame
+load_tidy(path, cal_file=None, k_per_mw=None, *, k_mW=None, source=None) -> pd.DataFrame
     Load a single run as a tidy DataFrame with one row per sample.
+    ``k_per_mw`` (or the deprecated alias ``k_mW``) sets trap-1 stiffness in
+    pN/nm/mW; pass ``cal_file`` for a JSON/YAML calibration file instead.
 
 find_routine_segments(df) -> pd.DataFrame
     Annotate ``mode`` column using the registered mode detectors.
@@ -378,7 +380,7 @@ class OscillatorMode(ModeSpec):
             quad_start_positions: list[int] = []
             i = 0
             while i <= len(codes) - 4:
-                if codes[i : i + 4] == [4, 3, 4, 3]:
+                if [int(c) for c in codes[i : i + 4]] == [4, 3, 4, 3]:
                     quad_start_positions.append(i)
                     i += 4
                 else:
@@ -725,10 +727,10 @@ def apply_valid_mask(
     ext = df["extension_nm"].to_numpy(dtype=float)
     dext = np.abs(np.diff(ext, prepend=ext[0]))
     spike_mask = dext > spike_threshold_nm
-    # flag the sample at the jump and the following one
+    # flag the sample at the jump and the following one (no wrap-around)
     valid[spike_mask] = False
-    shifted = np.roll(spike_mask, 1)
-    shifted[0] = False
+    shifted = np.zeros(len(spike_mask), dtype=bool)
+    shifted[1:] = spike_mask[:-1]
     valid[shifted] = False
 
     df["valid"] = valid
