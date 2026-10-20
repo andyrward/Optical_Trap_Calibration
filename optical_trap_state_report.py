@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from optical_trap_toolbox import (
+    FORCE_EXTENSION_STATE,
     StateRun,
     build_state_report,
     export_state_report_csv,
@@ -25,6 +26,11 @@ from optical_trap_toolbox import (
 def format_state_report(report: dict) -> str:
     summary = report.get("summary", [])
     lines: list[str] = ["State report"]
+
+    pulls = report.get("pulls", {})
+    n_pulls = pulls.get("n_pulls", 0)
+    lines.append(f"Force-extension pulls (state {FORCE_EXTENSION_STATE}): {n_pulls}")
+
     if not summary:
         lines.append("No state runs detected.")
         return "\n".join(lines)
