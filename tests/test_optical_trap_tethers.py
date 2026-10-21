@@ -638,11 +638,14 @@ class TestHighHoldTailReference(unittest.TestCase):
 
         osc = df[df["mode"] == "oscillator"]
         self.assertFalse(osc.empty)
-        # Force at high hold should be ~0 (hold is the reference)
-        high_hold = osc[osc["phase"] == "hold"]
+        # Force at high hold should be ~0 (high hold is the reference).
+        # With state-based phase assignment (Task B), state 3 is always "hold",
+        # so both the low-voltage hold and the high-voltage hold are labelled
+        # "hold".  We check only the high-voltage hold (V > 7.0 V) for ~0 force.
+        high_hold = osc[(osc["phase"] == "hold") & (osc["voltage_v"] > 7.0)]
+        self.assertFalse(high_hold.empty, "High-voltage hold frames must exist")
         if len(high_hold):
             mean_force_at_ref = high_hold["force_pn"].dropna().mean()
-            # Allow NaN or near-zero
             if not np.isnan(mean_force_at_ref):
                 self.assertAlmostEqual(mean_force_at_ref, 0.0, delta=0.1)
 

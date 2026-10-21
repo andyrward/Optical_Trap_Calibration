@@ -169,6 +169,8 @@ def load_tidy(
     k_per_mw: float | None = None,
     *,
     source: str | None = None,
+    edge_correction: bool = False,
+    edge_correction_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """Load a single run as a tidy per-sample DataFrame.
 
@@ -230,6 +232,12 @@ def load_tidy(
     state_code = trace.get("state_code", np.full(n, np.nan))
     act_state = trace.get("actuation_state_code", np.zeros(n))
 
+    # Raw edge columns (only present for 7-column files)
+    edge1_raw = trace.get("edge1_raw_nm", np.full(n, np.nan))
+    edge2_raw = trace.get("edge2_raw_nm", np.full(n, np.nan))
+    edge3_raw = trace.get("edge3_raw_nm", np.full(n, np.nan))
+    edge4_raw = trace.get("edge4_raw_nm", np.full(n, np.nan))
+
     # Stiffness: k_mW × power
     if not np.isnan(k1):
         stiffness = k1 * power
@@ -257,6 +265,11 @@ def load_tidy(
             "state_code": state_code.astype(float),
             "actuation_state_code": act_state.astype(float),
             "calibration_id": cal_id,
+            # Raw edge columns (NaN for 6-column files)
+            "edge1_raw_nm": edge1_raw,
+            "edge2_raw_nm": edge2_raw,
+            "edge3_raw_nm": edge3_raw,
+            "edge4_raw_nm": edge4_raw,
             # placeholders filled by downstream functions
             "mode": "other",
             "cycle": pd.NA,
@@ -277,6 +290,12 @@ def load_tidy(
     )
     df["cycle"] = df["cycle"].astype(pd.Int64Dtype())
     df["fe_attempt"] = df["fe_attempt"].astype(pd.Int64Dtype())
+
+    # Optional edge-tracking correction
+    if edge_correction:
+        from optical_trap_edge_correction import correct_edge_tracking
+        kwargs = edge_correction_kwargs or {}
+        df = correct_edge_tracking(df, **kwargs)
 
     return df
 
@@ -431,12 +450,66 @@ class OscillatorMode(ModeSpec):
         dv_dt_threshold: float,
         smooth_window: int,
     ) -> pd.DataFrame:
-        df_seg = df_seg.copy()
-        voltage = df_seg["voltage_v"].to_numpy(dtype=float)
-        phase_arr = _voltage_to_phase(voltage, dv_dt_threshold, smooth_window)
+        """Assign oscillator phases from the state column.
 
-        # Assign cycles: each transition from a hold-at-high-V back to pull_out
-        # starts a new cycle.  We detect cycles as runs of the 4-phase pattern.
+        * state 3  → ``"hold"``
+        * state 4  → ``"pull_out"`` (falling voltage) or ``"pull_in"``
+          (rising voltage); direction is determined from the overall voltage
+          trend of each contiguous state-4 run, not per-sample dV/dt.
+        * Any other state inside the segment is assigned ``"unknown"`` and
+          a warning is logged with the affected times.
+        """
+        df_seg = df_seg.copy()
+        n = len(df_seg)
+        state = df_seg["state_code"].to_numpy(dtype=float)
+        voltage = df_seg["voltage_v"].to_numpy(dtype=float)
+        time_s = df_seg["time_s"].to_numpy(dtype=float)
+
+        phase_arr = np.empty(n, dtype=object)
+
+        # First pass: assign phase from state code
+        for i in range(n):
+            s = int(state[i]) if np.isfinite(state[i]) else -1
+            if s == OSCILLATOR_HOLD_STATE:      # 3
+                phase_arr[i] = "hold"
+            elif s == OSCILLATOR_RAMP_STATE:    # 4
+                phase_arr[i] = "ramp"           # temporary; filled below
+            else:
+                phase_arr[i] = "unknown"
+
+        # Second pass: for each contiguous state-4 run, determine direction
+        # from the overall voltage change (first → last sample of the run).
+        diff = np.diff((state == OSCILLATOR_RAMP_STATE).astype(np.int8), prepend=0, append=0)
+        ramp_starts = np.where(diff == 1)[0]
+        ramp_ends = np.where(diff == -1)[0]
+        for rs, re in zip(ramp_starts, ramp_ends):
+            v_run = voltage[rs:re]
+            if len(v_run) >= 2:
+                direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
+            else:
+                direction = "pull_out"  # single-sample run: default
+            phase_arr[rs:re] = direction
+
+        # Warn about any unknown states
+        unknown_mask = phase_arr == "unknown"
+        if unknown_mask.any():
+            unknown_times = time_s[unknown_mask]
+            unknown_states = state[unknown_mask]
+            unique_unknown = sorted(
+                set(int(s) for s in unknown_states if np.isfinite(s))
+            )
+            logger.warning(
+                "Oscillator segment: %d frame(s) with unknown state code(s) %s at "
+                "times %.3f … %.3f s. Treating as 'hold'.",
+                int(unknown_mask.sum()),
+                unique_unknown,
+                float(unknown_times[0]),
+                float(unknown_times[-1]),
+            )
+            # Treat unknown states as hold for cycle numbering purposes
+            phase_arr[unknown_mask] = "hold"
+
+        # Assign cycles and setpoint
         cycle_arr = _assign_oscillator_cycles(phase_arr)
 
         df_seg["phase"] = phase_arr
@@ -1071,7 +1144,11 @@ def compute_force_reference(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
             )
-            hold_mask = cmask & (phase_col == "hold") & valid_mask
+            hold_mask = cmask & np.array(
+                [p == "hold" if (p is not pd.NA and p is not None) else False
+                 for p in phase_col],
+                dtype=bool,
+            ) & valid_mask
             if not hold_mask.any():
                 continue
             hold_v = df["voltage_v"].to_numpy(dtype=float)
@@ -1136,7 +1213,11 @@ def label_tether_detection_outcomes(
     fe_attempts = df["fe_attempt"].to_numpy(dtype=object)
 
     # Find unique attempts with "broke_or_no_tether"
-    bn_mask = outcome == "broke_or_no_tether"
+    bn_mask = np.array(
+        [o == "broke_or_no_tether" if (o is not pd.NA and o is not None) else False
+         for o in outcome],
+        dtype=bool,
+    )
     if not bn_mask.any():
         return df
 
@@ -1148,7 +1229,12 @@ def label_tether_detection_outcomes(
              if a is not pd.NA and a is not None and a == attempt_val],
             dtype=np.intp,
         )
-        pull_rows = attempt_rows[outcome[attempt_rows] == "broke_or_no_tether"]
+        pull_rows = attempt_rows[np.array(
+            [outcome[r] == "broke_or_no_tether"
+             if (outcome[r] is not pd.NA and outcome[r] is not None) else False
+             for r in attempt_rows],
+            dtype=bool,
+        )]
         if len(pull_rows) == 0:
             continue
         pull_force = force[pull_rows]
@@ -1300,7 +1386,28 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         else 0
     )
 
-    return {
+    # Count and warn about unknown state codes
+    n_unknown_states = 0
+    if "state_code" in df.columns:
+        sc = df["state_code"].dropna()
+        sc_int = sc[sc.apply(lambda x: float(x) == int(float(x)))].astype(int)
+        unknown_sc = sc_int[~sc_int.isin(STATE_LABELS.keys())]
+        n_unknown_states = len(unknown_sc)
+        if n_unknown_states:
+            vc = unknown_sc.value_counts()
+            logger.warning(
+                "%s: unknown state code(s) encountered: %s",
+                source,
+                ", ".join(f"state {k} ({v} frame(s))" for k, v in vc.items()),
+            )
+
+    # Edge-correction summary if present
+    edge_summary: dict[str, Any] = {}
+    if "edge_flag" in df.columns:
+        from optical_trap_edge_correction import summarize_edge_correction
+        edge_summary = summarize_edge_correction(df)
+
+    result: dict[str, Any] = {
         "source": source,
         "n_force_extension_pulls": n_fe_pulls,
         "n_tether_attempts": n_fe_pulls,
@@ -1308,12 +1415,38 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         "n_broke": n_broke,
         "n_no_tether": n_no_tether,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
+        "n_unknown_state_frames": n_unknown_states,
     }
+    result.update(edge_summary)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _expand_paths(raw: list[str]) -> list[Path]:
+    """Expand a list of file/folder arguments to individual .dat file paths.
+
+    If an argument is a directory, reads only the top-level .dat files,
+    skipping ``*_Voltage.dat`` and ``*_params.dat``.  No recursion.
+    """
+    paths: list[Path] = []
+    for p in raw:
+        fp = Path(p)
+        if fp.is_dir():
+            dat_files = sorted(
+                f for f in fp.glob("*.dat")
+                if not f.name.endswith("_Voltage.dat")
+                and not f.name.endswith("_params.dat")
+            )
+            if not dat_files:
+                print(f"Warning: no .dat files found in directory {fp}", file=sys.stderr)
+            paths.extend(dat_files)
+        else:
+            paths.append(fp)
+    return paths
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -1326,16 +1459,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "files",
         nargs="+",
-        help="One or more .dat run files to process.",
+        help=(
+            "One or more .dat run files to process, or a single folder "
+            "(top-level .dat files only; _Voltage.dat and _params.dat skipped)."
+        ),
     )
     parser.add_argument(
         "--mode",
-        choices=["oscillator", "tether-detection", "auto"],
-        default="auto",
+        choices=["oscillator", "tether-detection"],
+        required=True,
         help=(
-            "Analysis mode.  'oscillator' expects states 3/4; "
-            "'tether-detection' expects states 23/24/25/26/27/29/30; "
-            "'auto' uses all registered mode detectors (default)."
+            "Analysis mode (required).  'oscillator' expects states 3/4; "
+            "'tether-detection' expects states 23/24/25/26/27/29/30."
         ),
     )
     parser.add_argument(
@@ -1361,7 +1496,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--dv-dt-threshold",
         type=float,
         default=0.0003,
-        help="dV/dt threshold (V/sample) for hold/ramp phase discrimination.",
+        help="dV/dt threshold (V/sample) retained for back-compatibility; no longer used for oscillator phase assignment.",
     )
     parser.add_argument(
         "--force-ref",
@@ -1384,6 +1519,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=100,
         help="Number of tail frames for --force-ref high_hold_tail.",
     )
+    parser.add_argument(
+        "--edge-correction",
+        action="store_true",
+        default=False,
+        help="Apply edge-tracking correction before analysis (default: off).",
+    )
     return parser
 
 
@@ -1391,14 +1532,33 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 
+    fpaths = _expand_paths(args.files)
+    if not fpaths:
+        print("Error: no input files found.", file=sys.stderr)
+        return 1
+
     frames: list[pd.DataFrame] = []
     summaries: list[dict[str, Any]] = []
 
-    mode_name = {"auto": None, "oscillator": "oscillator", "tether-detection": "tether_detection"}.get(args.mode)
-    for fpath in args.files:
+    mode_name = {"oscillator": "oscillator", "tether-detection": "tether_detection"}[args.mode]
+    for fpath in fpaths:
         try:
-            df = load_tidy(fpath, k_per_mw=args.k_per_mw, cal_file=args.cal_file)
+            df = load_tidy(
+                fpath,
+                k_per_mw=args.k_per_mw,
+                cal_file=args.cal_file,
+                edge_correction=args.edge_correction,
+            )
             df = find_routine_segments(df, mode=mode_name)
+
+            # Check that the expected mode was detected
+            if not (df["mode"] == mode_name).any():
+                print(
+                    f"Warning: {fpath}: no '{mode_name}' segments detected. "
+                    f"Check that the file contains the expected state codes.",
+                    file=sys.stderr,
+                )
+
             df = label_cycles(df, dv_dt_threshold=args.dv_dt_threshold)
             df = apply_valid_mask(df)
 

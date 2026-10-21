@@ -22,7 +22,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from optical_trap_tidy import load_tidy, find_routine_segments, label_cycles, apply_valid_mask
+from optical_trap_tidy import (
+    load_tidy,
+    find_routine_segments,
+    label_cycles,
+    apply_valid_mask,
+    compute_force_reference,
+    _expand_paths,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +241,14 @@ def plot_oscillator(df: pd.DataFrame, stats: pd.DataFrame) -> plt.Figure:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze oscillator cycles in tidy optical-trap data.")
-    parser.add_argument("files", nargs="+", help="One or more .dat run files to analyze.")
+    parser.add_argument(
+        "files",
+        nargs="+",
+        help=(
+            "One or more .dat run files to analyze, or a single folder "
+            "(top-level .dat files only; _Voltage.dat and _params.dat skipped)."
+        ),
+    )
     parser.add_argument("--k-per-mw", type=float, default=None, help="Trap-1 stiffness per mW (pN/nm/mW).")
     parser.add_argument("--cal-file", default=None, help="Path to JSON/YAML calibration file.")
     parser.add_argument(
@@ -246,7 +260,31 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--dv-dt-threshold",
         type=float,
         default=0.0003,
-        help="dV/dt threshold (V/sample) for hold/ramp discrimination.",
+        help="dV/dt threshold (V/sample) retained for back-compatibility; no longer used for oscillator phase assignment.",
+    )
+    parser.add_argument(
+        "--force-ref",
+        choices=["high_hold_tail", "fixed"],
+        default="high_hold_tail",
+        help="Force reference method for oscillator mode (default: high_hold_tail).",
+    )
+    parser.add_argument(
+        "--force-ref-frames",
+        type=int,
+        default=100,
+        help="Number of tail frames for --force-ref high_hold_tail.",
+    )
+    parser.add_argument(
+        "--force-ref-nm",
+        type=float,
+        default=None,
+        help="Fixed reference position for --force-ref fixed (nm).",
+    )
+    parser.add_argument(
+        "--edge-correction",
+        action="store_true",
+        default=False,
+        help="Apply edge-tracking correction before analysis (default: off).",
     )
     return parser
 
@@ -258,15 +296,34 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 
+    fpaths = _expand_paths(args.files)
+    if not fpaths:
+        print("Error: no input files found.", file=sys.stderr)
+        return 1
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for fpath in args.files:
+    for fpath in fpaths:
         try:
-            df = load_tidy(fpath, k_per_mw=args.k_per_mw, cal_file=args.cal_file)
-            df = find_routine_segments(df)
+            df = load_tidy(
+                fpath,
+                k_per_mw=args.k_per_mw,
+                cal_file=args.cal_file,
+                edge_correction=args.edge_correction,
+            )
+            df = find_routine_segments(df, mode="oscillator")
             df = label_cycles(df, dv_dt_threshold=args.dv_dt_threshold)
             df = apply_valid_mask(df)
+
+            # Compute force if stiffness is available
+            if not df["stiffness_pn_per_nm"].isna().all():
+                df = compute_force_reference(
+                    df,
+                    method=args.force_ref,
+                    force_ref_nm=args.force_ref_nm,
+                    force_ref_frames=args.force_ref_frames,
+                )
 
             source = df["source"].iloc[0]
             stats = analyze_oscillator(df, source=source)
