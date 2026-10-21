@@ -200,8 +200,17 @@ def load_normalized_trace(
     elif n_cols == 7:
         # MATLAB two-trap layout:
         # [time, trap1_a, trap2_a, trap1_b, trap2_b, primary_state, actuation_state]
+        # Column assignments (1-indexed):
+        #   col2 = trap1 outer edge (data[:,1])
+        #   col3 = trap2 outer edge (data[:,2])
+        #   col4 = trap1 interface edge (data[:,3])
+        #   col5 = trap2 interface edge (data[:,4])
         # Pairing follows the repo convention: trap1 = mean(col1, col3) and trap2 = mean(col2, col4).
         # Power/voltage for these files come exclusively from the companion _Voltage.dat.
+        trace["edge1_raw_nm"] = data[:, 1]   # trap1 outer edge (col2)
+        trace["edge2_raw_nm"] = data[:, 2]   # trap2 outer edge (col3)
+        trace["edge3_raw_nm"] = data[:, 3]   # trap1 interface edge (col4)
+        trace["edge4_raw_nm"] = data[:, 4]   # trap2 interface edge (col5)
         trace["position_1_nm"] = (data[:, 1] + data[:, 3]) / 2.0
         trace["position_2_nm"] = (data[:, 2] + data[:, 4]) / 2.0
         trace["state_code"] = data[:, 5]

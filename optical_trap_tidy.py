@@ -169,6 +169,8 @@ def load_tidy(
     k_per_mw: float | None = None,
     *,
     source: str | None = None,
+    edge_correction: bool = False,
+    edge_correction_kwargs: dict | None = None,
 ) -> pd.DataFrame:
     """Load a single run as a tidy per-sample DataFrame.
 
@@ -230,6 +232,12 @@ def load_tidy(
     state_code = trace.get("state_code", np.full(n, np.nan))
     act_state = trace.get("actuation_state_code", np.zeros(n))
 
+    # Raw edge columns (only present for 7-column files)
+    edge1_raw = trace.get("edge1_raw_nm", np.full(n, np.nan))
+    edge2_raw = trace.get("edge2_raw_nm", np.full(n, np.nan))
+    edge3_raw = trace.get("edge3_raw_nm", np.full(n, np.nan))
+    edge4_raw = trace.get("edge4_raw_nm", np.full(n, np.nan))
+
     # Stiffness: k_mW × power
     if not np.isnan(k1):
         stiffness = k1 * power
@@ -257,6 +265,11 @@ def load_tidy(
             "state_code": state_code.astype(float),
             "actuation_state_code": act_state.astype(float),
             "calibration_id": cal_id,
+            # Raw edge columns (NaN for 6-column files)
+            "edge1_raw_nm": edge1_raw,
+            "edge2_raw_nm": edge2_raw,
+            "edge3_raw_nm": edge3_raw,
+            "edge4_raw_nm": edge4_raw,
             # placeholders filled by downstream functions
             "mode": "other",
             "cycle": pd.NA,
@@ -277,6 +290,12 @@ def load_tidy(
     )
     df["cycle"] = df["cycle"].astype(pd.Int64Dtype())
     df["fe_attempt"] = df["fe_attempt"].astype(pd.Int64Dtype())
+
+    # Optional edge-tracking correction
+    if edge_correction:
+        from optical_trap_edge_correction import correct_edge_tracking
+        kwargs = edge_correction_kwargs or {}
+        df = correct_edge_tracking(df, **kwargs)
 
     return df
 
@@ -431,12 +450,66 @@ class OscillatorMode(ModeSpec):
         dv_dt_threshold: float,
         smooth_window: int,
     ) -> pd.DataFrame:
-        df_seg = df_seg.copy()
-        voltage = df_seg["voltage_v"].to_numpy(dtype=float)
-        phase_arr = _voltage_to_phase(voltage, dv_dt_threshold, smooth_window)
+        """Assign oscillator phases from the state column.
 
-        # Assign cycles: each transition from a hold-at-high-V back to pull_out
-        # starts a new cycle.  We detect cycles as runs of the 4-phase pattern.
+        * state 3  → ``"hold"``
+        * state 4  → ``"pull_out"`` (falling voltage) or ``"pull_in"``
+          (rising voltage); direction is determined from the overall voltage
+          trend of each contiguous state-4 run, not per-sample dV/dt.
+        * Any other state inside the segment is assigned ``"unknown"`` and
+          a warning is logged with the affected times.
+        """
+        df_seg = df_seg.copy()
+        n = len(df_seg)
+        state = df_seg["state_code"].to_numpy(dtype=float)
+        voltage = df_seg["voltage_v"].to_numpy(dtype=float)
+        time_s = df_seg["time_s"].to_numpy(dtype=float)
+
+        phase_arr = np.empty(n, dtype=object)
+
+        # First pass: assign phase from state code
+        for i in range(n):
+            s = int(state[i]) if np.isfinite(state[i]) else -1
+            if s == OSCILLATOR_HOLD_STATE:      # 3
+                phase_arr[i] = "hold"
+            elif s == OSCILLATOR_RAMP_STATE:    # 4
+                phase_arr[i] = "ramp"           # temporary; filled below
+            else:
+                phase_arr[i] = "unknown"
+
+        # Second pass: for each contiguous state-4 run, determine direction
+        # from the overall voltage change (first → last sample of the run).
+        diff = np.diff((state == OSCILLATOR_RAMP_STATE).astype(np.int8), prepend=0, append=0)
+        ramp_starts = np.where(diff == 1)[0]
+        ramp_ends = np.where(diff == -1)[0]
+        for rs, re in zip(ramp_starts, ramp_ends):
+            v_run = voltage[rs:re]
+            if len(v_run) >= 2:
+                direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
+            else:
+                direction = "pull_out"  # single-sample run: default
+            phase_arr[rs:re] = direction
+
+        # Warn about any unknown states
+        unknown_mask = phase_arr == "unknown"
+        if unknown_mask.any():
+            unknown_times = time_s[unknown_mask]
+            unknown_states = state[unknown_mask]
+            unique_unknown = sorted(
+                set(int(s) for s in unknown_states if np.isfinite(s))
+            )
+            logger.warning(
+                "Oscillator segment: %d frame(s) with unknown state code(s) %s at "
+                "times %.3f … %.3f s. Treating as 'hold'.",
+                int(unknown_mask.sum()),
+                unique_unknown,
+                float(unknown_times[0]),
+                float(unknown_times[-1]),
+            )
+            # Treat unknown states as hold for cycle numbering purposes
+            phase_arr[unknown_mask] = "hold"
+
+        # Assign cycles and setpoint
         cycle_arr = _assign_oscillator_cycles(phase_arr)
 
         df_seg["phase"] = phase_arr
@@ -1063,6 +1136,10 @@ def compute_force_reference(
 
         # Determine which hold is the "high" one per cycle: the hold with
         # the higher mean voltage.
+        hold_phase_mask = np.array(
+            [p == "hold" if (p is not pd.NA and p is not None) else False for p in phase_col],
+            dtype=bool,
+        )
         unique_cycles = sorted(
             set(int(c) for c in cycles if c is not pd.NA and c is not None)
         )
@@ -1071,7 +1148,7 @@ def compute_force_reference(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
             )
-            hold_mask = cmask & (phase_col == "hold") & valid_mask
+            hold_mask = cmask & hold_phase_mask & valid_mask
             if not hold_mask.any():
                 continue
             hold_v = df["voltage_v"].to_numpy(dtype=float)
@@ -1136,10 +1213,18 @@ def label_tether_detection_outcomes(
     fe_attempts = df["fe_attempt"].to_numpy(dtype=object)
 
     # Find unique attempts with "broke_or_no_tether"
-    bn_mask = outcome == "broke_or_no_tether"
+    bn_mask = np.array(
+        [o == "broke_or_no_tether" if (o is not pd.NA and o is not None) else False
+         for o in outcome],
+        dtype=bool,
+    )
     if not bn_mask.any():
         return df
 
+    outcome_bn_mask = np.array(
+        [o == "broke_or_no_tether" if (o is not pd.NA and o is not None) else False for o in outcome],
+        dtype=bool,
+    )
     for attempt_val in set(fe_attempts[bn_mask]):
         if attempt_val is pd.NA or attempt_val is None:
             continue
@@ -1148,7 +1233,7 @@ def label_tether_detection_outcomes(
              if a is not pd.NA and a is not None and a == attempt_val],
             dtype=np.intp,
         )
-        pull_rows = attempt_rows[outcome[attempt_rows] == "broke_or_no_tether"]
+        pull_rows = attempt_rows[outcome_bn_mask[attempt_rows]]
         if len(pull_rows) == 0:
             continue
         pull_force = force[pull_rows]
@@ -1228,6 +1313,173 @@ def extract_reference_data(
 
 
 # ---------------------------------------------------------------------------
+# Rupture detection (Task C.6)
+# ---------------------------------------------------------------------------
+
+
+def detect_rupture_events(
+    df: pd.DataFrame,
+    *,
+    threshold_pn: float = 5.0,
+    n_samples: int = 100,
+) -> pd.DataFrame:
+    """Detect rupture events for each 'broke' pull attempt.
+
+    Scans the ``pull_out`` phase of every broke attempt for the last valid
+    sample before the force drops by more than *threshold_pn* within
+    *n_samples* consecutive samples.  The frame immediately before the first
+    such drop is taken as the rupture point.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode, after force computation and
+        outcome labelling).
+    threshold_pn:
+        Force drop required to identify a rupture (pN).
+    n_samples:
+        Window of samples to check for the drop.
+
+    Returns
+    -------
+    DataFrame with one row per broke attempt.  Columns:
+    ``fe_attempt``, ``rupture_time_s``, ``rupture_force_pn``,
+    ``rupture_extension_nm``.
+    """
+    records: list[dict[str, Any]] = []
+
+    force = df["force_pn"].to_numpy(dtype=float)
+    ext = df["extension_nm"].to_numpy(dtype=float) if "extension_nm" in df.columns else np.full(len(df), np.nan)
+    t = df["time_s"].to_numpy(dtype=float)
+    phase_col = df["phase"].to_numpy(dtype=object)
+    outcome_col = df["outcome"].to_numpy(dtype=object) if "outcome" in df.columns else np.full(len(df), None, dtype=object)
+    fe_col = df["fe_attempt"].to_numpy(dtype=object)
+    valid_col = df["valid"].to_numpy(dtype=bool) if "valid" in df.columns else np.ones(len(df), dtype=bool)
+
+    unique_attempts = sorted(
+        set(int(a) for a in fe_col if a is not pd.NA and a is not None)
+    )
+    for attempt in unique_attempts:
+        attempt_mask = np.array(
+            [a is not pd.NA and a is not None and int(a) == attempt for a in fe_col],
+            dtype=bool,
+        )
+        # Only process broke attempts
+        attempt_outcomes = outcome_col[attempt_mask]
+        if not any(
+            o is not None and o is not pd.NA and o == "broke"
+            for o in attempt_outcomes
+        ):
+            continue
+
+        phase_mask = np.array(
+            [p == "pull_out" if p is not pd.NA and p is not None else False for p in phase_col],
+            dtype=bool,
+        )
+        pull_mask = attempt_mask & phase_mask & valid_col
+        idx = np.where(pull_mask)[0]
+        if len(idx) < 2:
+            continue
+
+        # Search forward for the first window where the force drops by more
+        # than threshold_pn within n_samples frames, then record the preceding
+        # peak sample instead of the post-break tail.
+        pull_force = force[idx]
+        rupture_i = None
+        for j in range(len(idx) - 1):
+            window_end = min(len(idx), j + n_samples + 1)
+            window = pull_force[j:window_end]
+            finite_mask = np.isfinite(window)
+            if finite_mask.sum() < 2:
+                continue
+            peak_val = np.nanmax(window[finite_mask])
+            final_val = window[finite_mask][-1]
+            if (peak_val - final_val) >= threshold_pn:
+                peak_positions = np.flatnonzero(finite_mask & (window == peak_val))
+                rupture_i = idx[j + int(peak_positions[0])]
+                break
+
+        if rupture_i is not None:
+            records.append(
+                {
+                    "fe_attempt": attempt,
+                    "rupture_time_s": float(t[rupture_i]),
+                    "rupture_force_pn": float(force[rupture_i]),
+                    "rupture_extension_nm": float(ext[rupture_i]),
+                }
+            )
+
+    return pd.DataFrame(records)
+
+
+def extract_attempt_summary(
+    df: pd.DataFrame,
+    *,
+    rupture_threshold_pn: float = 5.0,
+    rupture_n_samples: int = 100,
+) -> pd.DataFrame:
+    """Return a per-attempt summary for tether-detection runs.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode, after force computation and
+        outcome labelling).
+    rupture_threshold_pn, rupture_n_samples:
+        Forwarded to :func:`detect_rupture_events`.
+
+    Returns
+    -------
+    DataFrame with one row per pull attempt.  Columns: ``fe_attempt``,
+    ``outcome``, ``peak_force_pn``, ``max_extension_nm``,
+    ``rupture_time_s``, ``rupture_force_pn``, ``rupture_extension_nm``,
+    ``source``, ``tether_id``.
+    """
+    td_mask = df["mode"].eq("tether_detection")
+    td_df = df[td_mask]
+    pull_df = td_df[td_df["phase"].fillna(False).eq("pull_out")]
+    if len(pull_df) == 0:
+        return pd.DataFrame()
+
+    ruptures = detect_rupture_events(
+        td_df,
+        threshold_pn=rupture_threshold_pn,
+        n_samples=rupture_n_samples,
+    )
+    rup_by_attempt = ruptures.set_index("fe_attempt") if len(ruptures) else pd.DataFrame()
+
+    source = df["source"].iloc[0] if "source" in df.columns else ""
+    tid = df["tether_id"].iloc[0] if "tether_id" in df.columns else ""
+
+    rows = []
+    for attempt_val, grp in pull_df.groupby(pull_df["fe_attempt"].dropna().astype(int)):
+        valid_grp = grp[grp["valid"].astype(bool)] if "valid" in grp.columns else grp
+        outcome = grp["outcome"].iloc[0] if "outcome" in grp.columns else None
+        peak_force = float(valid_grp["force_pn"].dropna().max()) if "force_pn" in valid_grp.columns else np.nan
+        max_ext = float(valid_grp["extension_nm"].dropna().max()) if "extension_nm" in valid_grp.columns else np.nan
+
+        row: dict[str, Any] = {
+            "fe_attempt": int(attempt_val),
+            "outcome": outcome,
+            "peak_force_pn": peak_force,
+            "max_extension_nm": max_ext,
+            "rupture_time_s": np.nan,
+            "rupture_force_pn": np.nan,
+            "rupture_extension_nm": np.nan,
+            "source": source,
+            "tether_id": tid,
+        }
+        if len(rup_by_attempt) and attempt_val in rup_by_attempt.index:
+            rrow = rup_by_attempt.loc[attempt_val]
+            row["rupture_time_s"] = float(rrow["rupture_time_s"])
+            row["rupture_force_pn"] = float(rrow["rupture_force_pn"])
+            row["rupture_extension_nm"] = float(rrow["rupture_extension_nm"])
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # load_many
 # ---------------------------------------------------------------------------
 
@@ -1300,7 +1552,28 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         else 0
     )
 
-    return {
+    # Count and warn about unknown state codes
+    n_unknown_states = 0
+    if "state_code" in df.columns:
+        sc = df["state_code"].dropna()
+        sc_int = sc[sc.apply(lambda x: float(x) == int(float(x)))].astype(int)
+        unknown_sc = sc_int[~sc_int.isin(STATE_LABELS.keys())]
+        n_unknown_states = len(unknown_sc)
+        if n_unknown_states:
+            vc = unknown_sc.value_counts()
+            logger.warning(
+                "%s: unknown state code(s) encountered: %s",
+                source,
+                ", ".join(f"state {k} ({v} frame(s))" for k, v in vc.items()),
+            )
+
+    # Edge-correction summary if present
+    edge_summary: dict[str, Any] = {}
+    if "edge_flag" in df.columns:
+        from optical_trap_edge_correction import summarize_edge_correction
+        edge_summary = summarize_edge_correction(df)
+
+    result: dict[str, Any] = {
         "source": source,
         "n_force_extension_pulls": n_fe_pulls,
         "n_tether_attempts": n_fe_pulls,
@@ -1308,12 +1581,38 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         "n_broke": n_broke,
         "n_no_tether": n_no_tether,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
+        "n_unknown_state_frames": n_unknown_states,
     }
+    result.update(edge_summary)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _expand_paths(raw: list[str]) -> list[Path]:
+    """Expand a list of file/folder arguments to individual .dat file paths.
+
+    If an argument is a directory, reads only the top-level .dat files,
+    skipping ``*_Voltage.dat`` and ``*_params.dat``.  No recursion.
+    """
+    paths: list[Path] = []
+    for p in raw:
+        fp = Path(p)
+        if fp.is_dir():
+            dat_files = sorted(
+                f for f in fp.glob("*.dat")
+                if not f.name.endswith("_Voltage.dat")
+                and not f.name.endswith("_params.dat")
+            )
+            if not dat_files:
+                print(f"Warning: no .dat files found in directory {fp}", file=sys.stderr)
+            paths.extend(dat_files)
+        else:
+            paths.append(fp)
+    return paths
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -1326,16 +1625,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "files",
         nargs="+",
-        help="One or more .dat run files to process.",
+        help=(
+            "One or more .dat run files to process, or a single folder "
+            "(top-level .dat files only; _Voltage.dat and _params.dat skipped)."
+        ),
     )
     parser.add_argument(
         "--mode",
-        choices=["oscillator", "tether-detection", "auto"],
-        default="auto",
+        choices=["oscillator", "tether-detection"],
+        required=True,
         help=(
-            "Analysis mode.  'oscillator' expects states 3/4; "
-            "'tether-detection' expects states 23/24/25/26/27/29/30; "
-            "'auto' uses all registered mode detectors (default)."
+            "Analysis mode (required).  'oscillator' expects states 3/4; "
+            "'tether-detection' expects states 23/24/25/26/27/29/30."
         ),
     )
     parser.add_argument(
@@ -1361,7 +1662,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--dv-dt-threshold",
         type=float,
         default=0.0003,
-        help="dV/dt threshold (V/sample) for hold/ramp phase discrimination.",
+        help="dV/dt threshold (V/sample) retained for back-compatibility; no longer used for oscillator phase assignment.",
     )
     parser.add_argument(
         "--force-ref",
@@ -1384,6 +1685,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=100,
         help="Number of tail frames for --force-ref high_hold_tail.",
     )
+    parser.add_argument(
+        "--edge-correction",
+        action="store_true",
+        default=False,
+        help="Apply edge-tracking correction before analysis (default: off).",
+    )
+    # Tether / provenance flags (Task C.5)
+    parser.add_argument("--date", default=None,
+                        help="Experiment date (YYYYMMDD or YYYY-MM-DD) for tether ID generation.")
+    parser.add_argument("--bead", type=int, default=None,
+                        help="Bead number for tether ID generation.")
+    parser.add_argument("--tether-id", default=None,
+                        help="Explicit tether ID (overrides --date/--bead auto-generation).")
+    parser.add_argument("--link-previous", action="store_true", default=False,
+                        help="Attempt to link to the most recent active tether for this folder/bead.")
+    parser.add_argument("--target", default=None,
+                        help="Output directory for tethers.csv, provenance.json, session manifest.")
+    parser.add_argument("--registry", default=None,
+                        help="Path to the tether registry CSV file.")
     return parser
 
 
@@ -1391,14 +1711,78 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 
+    fpaths = _expand_paths(args.files)
+    if not fpaths:
+        print("Error: no input files found.", file=sys.stderr)
+        return 1
+    if args.link_previous and not args.registry:
+        print(
+            "Warning: --link-previous was requested but no --registry path was supplied; skipping registry lookup.",
+            file=sys.stderr,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Resolve tether metadata (Task C.5)                                   #
+    # ------------------------------------------------------------------ #
+    tether_id: str | None = args.tether_id
+    metadata_source: dict[str, str] = {}
+    date_val: str | None = None
+    bead_val: int | None = None
+
+    if tether_id is None:
+        date_val = args.date
+        bead_val = args.bead
+        is_tty = sys.stdin.isatty()
+
+        if date_val is None and is_tty:
+            try:
+                date_val = input("Experiment date (YYYYMMDD): ").strip() or None
+                metadata_source["date"] = "prompt"
+            except EOFError:
+                pass
+        else:
+            metadata_source["date"] = "flag" if date_val is not None else "missing"
+
+        if bead_val is None and is_tty:
+            try:
+                bv = input("Bead number: ").strip()
+                bead_val = int(bv) if bv else None
+                metadata_source["bead"] = "prompt"
+            except (EOFError, ValueError):
+                pass
+        else:
+            metadata_source["bead"] = "flag" if bead_val is not None else "missing"
+
+    # ------------------------------------------------------------------ #
+    # Determine output target directory                                    #
+    # ------------------------------------------------------------------ #
+    target_dir: Path | None = Path(args.target) if args.target else None
+    if target_dir is not None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+
     frames: list[pd.DataFrame] = []
     summaries: list[dict[str, Any]] = []
+    manifest_entries: list[dict[str, Any]] = []
 
-    mode_name = {"auto": None, "oscillator": "oscillator", "tether-detection": "tether_detection"}.get(args.mode)
-    for fpath in args.files:
+    mode_name = {"oscillator": "oscillator", "tether-detection": "tether_detection"}[args.mode]
+    for fpath in fpaths:
         try:
-            df = load_tidy(fpath, k_per_mw=args.k_per_mw, cal_file=args.cal_file)
+            df = load_tidy(
+                fpath,
+                k_per_mw=args.k_per_mw,
+                cal_file=args.cal_file,
+                edge_correction=args.edge_correction,
+            )
             df = find_routine_segments(df, mode=mode_name)
+
+            # Check that the expected mode was detected
+            if not (df["mode"] == mode_name).any():
+                print(
+                    f"Warning: {fpath}: no '{mode_name}' segments detected. "
+                    f"Check that the file contains the expected state codes.",
+                    file=sys.stderr,
+                )
+
             df = label_cycles(df, dv_dt_threshold=args.dv_dt_threshold)
             df = apply_valid_mask(df)
 
@@ -1422,8 +1806,69 @@ def main(argv: list[str] | None = None) -> int:
                 if force_ref_method in ("measure_ref",):
                     df = label_tether_detection_outcomes(df)
 
+            # ---------------------------------------------------------- #
+            # Tether / provenance metadata on rows (Task C.5)            #
+            # ---------------------------------------------------------- #
+            file_tether_id = tether_id
+            if file_tether_id is None and args.link_previous and bead_val is not None:
+                from optical_trap_tethers import TetherRegistry
+                if args.registry:
+                    reg = TetherRegistry(args.registry)
+                    folder_path = str(Path(fpath).parent)
+                    file_tether_id = reg.link_previous(folder_path, bead_val)
+            if file_tether_id is not None:
+                df["tether_id"] = file_tether_id
+            if bead_val is not None:
+                df["bead"] = bead_val
+            if date_val is not None:
+                df["date"] = date_val
+
+            manifest_entries.append({"source_file": str(fpath), "tether_id": file_tether_id})
+
             frames.append(df)
             summaries.append(summarize_run(df))
+
+            # ---------------------------------------------------------- #
+            # Tether-detection outputs (Task C.7)                         #
+            # ---------------------------------------------------------- #
+            if mode_name == "tether_detection" and target_dir is not None:
+                stem = Path(fpath).stem
+                # Attempts CSV
+                if "phase" in df.columns and df["phase"].fillna(False).eq("pull_out").any():
+                    att_df = extract_attempt_summary(df)
+                    att_path = target_dir / f"{stem}_attempts.csv"
+                    att_df.to_csv(att_path, index=False)
+                    print(f"  Attempts CSV written to {att_path}")
+
+                # Force-extension figure
+                if "force_pn" in df.columns and not df["force_pn"].isna().all():
+                    try:
+                        import matplotlib
+                        matplotlib.use("Agg")
+                        import matplotlib.pyplot as plt
+                        fe_curves = extract_fe_curves(df)
+                        if len(fe_curves):
+                            fig, ax = plt.subplots(figsize=(8, 5))
+                            for att_id, grp in fe_curves.groupby("fe_attempt"):
+                                po = grp[grp["phase"] == "pull_out"]
+                                relax = grp[grp["phase"] == "relax"]
+                                ax.plot(po["extension_nm"], po["force_pn"],
+                                        color="steelblue", lw=0.8, alpha=0.7,
+                                        label="pull_out" if att_id == fe_curves["fe_attempt"].iloc[0] else "")
+                                ax.plot(relax["extension_nm"], relax["force_pn"],
+                                        color="coral", lw=0.8, alpha=0.7,
+                                        label="relax" if att_id == fe_curves["fe_attempt"].iloc[0] else "")
+                            ax.set_xlabel("Extension (nm)")
+                            ax.set_ylabel("Force (pN)")
+                            ax.set_title(f"Force-extension: {stem}")
+                            ax.legend(loc="upper left")
+                            fig_path = target_dir / f"{stem}_fe_curves.png"
+                            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+                            plt.close(fig)
+                            print(f"  Force-extension figure written to {fig_path}")
+                    except Exception as fig_exc:  # noqa: BLE001
+                        print(f"  Warning: could not write FE figure: {fig_exc}", file=sys.stderr)
+
         except Exception as exc:
             print(f"Error processing {fpath}: {exc}", file=sys.stderr)
             return 1
@@ -1438,6 +1883,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{s['n_oscillator_cycles']:>10}"
         )
 
+    # ------------------------------------------------------------------ #
+    # Tidy output file                                                     #
+    # ------------------------------------------------------------------ #
     if args.output and frames:
         all_df = pd.concat(frames, ignore_index=True)
         out = Path(args.output)
@@ -1453,6 +1901,64 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         print(f"\nTidy output written to {out}")
+
+    # ------------------------------------------------------------------ #
+    # Provenance and session manifest (Task C.5)                          #
+    # ------------------------------------------------------------------ #
+    if target_dir is not None and frames:
+        try:
+            from optical_trap_tethers import (
+                make_provenance_entry,
+                write_provenance,
+                write_session_manifest,
+                TetherRegistry,
+                generate_tether_id,
+            )
+            processing_id = str(__import__("uuid").uuid4())
+
+            # Session manifest
+            manifest_path = target_dir / "session_manifest.json"
+            write_session_manifest(manifest_entries, manifest_path)
+            print(f"\nSession manifest written to {manifest_path}")
+
+            # Provenance
+            params = {
+                "mode": args.mode,
+                "k_per_mw": args.k_per_mw,
+                "cal_file": str(args.cal_file) if args.cal_file else None,
+                "force_ref": args.force_ref,
+                "force_ref_frames": args.force_ref_frames,
+                "force_ref_nm": args.force_ref_nm,
+                "edge_correction": args.edge_correction,
+                "metadata_source": metadata_source,
+            }
+            for fpath in fpaths:
+                entry = make_provenance_entry(
+                    source_file=str(fpath),
+                    parameters=params,
+                    tether_ids=[tether_id] if tether_id else [],
+                    processing_id=processing_id,
+                )
+                write_provenance(entry, target_dir / "provenance.json")
+            print(f"Provenance written to {target_dir / 'provenance.json'}")
+
+            # Registry
+            if args.registry and date_val and bead_val is not None:
+                reg = TetherRegistry(args.registry)
+                for fpath in fpaths:
+                    reg.create_tether(
+                        date_val,
+                        bead_val,
+                        str(Path(fpath).parent),
+                        source_file=str(fpath),
+                        fe_attempt=None,
+                        target=args.target or "",
+                        processing_id=processing_id,
+                    )
+                reg.save()
+                print(f"Tether registry updated at {args.registry}")
+        except Exception as prov_exc:  # noqa: BLE001
+            print(f"Warning: could not write provenance/manifest: {prov_exc}", file=sys.stderr)
 
     return 0
 

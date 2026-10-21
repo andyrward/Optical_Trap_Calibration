@@ -667,8 +667,9 @@ def write_provenance(
 def describe_provenance(df: pd.DataFrame) -> dict[str, Any]:
     """Summarise which code versions and parameter sets appear in *df*.
 
-    Reads the ``processing_id`` column and any ``provenance_path`` column.
-    Returns a dict with unique processing IDs and any detected differences.
+    Reads the ``processing_id`` column and loads the corresponding entries from
+    ``provenance.json`` if a ``provenance_path`` column is present.  Returns a
+    diff when multiple processing runs are detected.
 
     Parameters
     ----------
@@ -677,8 +678,14 @@ def describe_provenance(df: pd.DataFrame) -> dict[str, Any]:
 
     Returns
     -------
-    Dict with ``processing_ids`` (list), ``n_unique_processing_ids`` (int),
-    and a ``warning`` string when multiple processing runs are detected.
+    Dict with:
+
+    * ``processing_ids`` – list of unique processing IDs.
+    * ``n_unique_processing_ids`` – count.
+    * ``parameter_diffs`` – list of keys that differ across processing runs
+      (only populated when entries are loaded from provenance.json).
+    * ``version_diffs`` – list of code-version fields that differ across runs.
+    * ``warning`` – human-readable warning string when multiple runs are detected.
     """
     if "processing_id" not in df.columns:
         return {
@@ -691,12 +698,55 @@ def describe_provenance(df: pd.DataFrame) -> dict[str, Any]:
     result: dict[str, Any] = {
         "processing_ids": unique_ids,
         "n_unique_processing_ids": len(unique_ids),
+        "parameter_diffs": [],
+        "version_diffs": [],
     }
+
+    # Try to load provenance entries if a path column is present
+    entries: list[dict[str, Any]] = []
+    if "provenance_path" in df.columns:
+        for ppath in df["provenance_path"].dropna().unique():
+            try:
+                raw = json.loads(Path(ppath).read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    entries.extend(raw)
+            except Exception:
+                pass
+        # Match entries to our processing IDs
+        entries = [e for e in entries if e.get("processing_id") in unique_ids]
+
+    if len(entries) >= 2:
+        # Diff parameters
+        param_sets = [e.get("parameters", {}) for e in entries]
+        all_keys = set().union(*[set(p.keys()) for p in param_sets])
+        for key in sorted(all_keys):
+            vals = [p.get(key) for p in param_sets]
+            if len(set(str(v) for v in vals)) > 1:
+                result["parameter_diffs"].append(
+                    {"key": key, "values": vals}
+                )
+        # Diff code versions
+        ver_sets = [e.get("code_version", {}) for e in entries]
+        ver_keys = set().union(*[set(v.keys()) for v in ver_sets])
+        for key in sorted(ver_keys):
+            vals = [v.get(key) for v in ver_sets]
+            if len(set(str(v) for v in vals)) > 1:
+                result["version_diffs"].append(
+                    {"key": key, "values": vals}
+                )
+
     if len(unique_ids) > 1:
+        diffs_summary = ""
+        if result["parameter_diffs"]:
+            diff_keys = [d["key"] for d in result["parameter_diffs"]]
+            diffs_summary = f"  Differing parameters: {', '.join(diff_keys)}."
+        if result["version_diffs"]:
+            ver_keys_l = [d["key"] for d in result["version_diffs"]]
+            diffs_summary += f"  Differing code-version fields: {', '.join(ver_keys_l)}."
         result["warning"] = (
             f"DataFrame contains rows from {len(unique_ids)} different processing "
             "runs. Results may have been produced with different code versions or "
-            "parameters. Check provenance.json for details."
+            f"parameters. Check provenance.json for details.{diffs_summary}"
         )
         warnings.warn(result["warning"], stacklevel=2)
 
