@@ -132,11 +132,15 @@ class TestOscillatorPatternDetection(unittest.TestCase):
         segs = self._detect(states)
         self.assertEqual(len(segs), 0)
 
-    def test_incomplete_pattern_not_detected(self):
-        # Only [4,3,4] (missing final 3) — not a complete quad
+    def test_incomplete_pattern_detected_as_partial_segment(self):
+        # A contiguous 3/4 block is still an oscillator segment even if it does
+        # not contain a complete [4,3,4,3] quad; it is retained as a partial
+        # cycle for downstream labeling.
         states = [4] * 50 + [3] * 20 + [4] * 50
         segs = self._detect(states)
-        self.assertEqual(len(segs), 0)
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0][0], 0)
+        self.assertEqual(segs[0][1], len(states) - 1)
 
 
 class TestForceExtensionDetection(unittest.TestCase):
