@@ -111,6 +111,23 @@ def _cycle_stats(df_cycle: pd.DataFrame) -> dict[str, Any]:
     finite = force_all[np.isfinite(force_all)]
     stats["peak_force_pn"] = float(np.max(np.abs(finite))) if len(finite) else float("nan")
 
+    # cycle completeness metadata
+    if "cycle_complete" in df_cycle.columns:
+        comp = df_cycle["cycle_complete"].dropna()
+        stats["cycle_complete"] = bool(comp.astype(bool).all()) if len(comp) else False
+    if "cycle_status" in df_cycle.columns:
+        st = df_cycle["cycle_status"].dropna()
+        stats["cycle_status"] = str(st.iloc[-1]) if len(st) else "unknown"
+    if "cycle_partial_reason" in df_cycle.columns:
+        reason = df_cycle["cycle_partial_reason"].dropna()
+        stats["cycle_partial_reason"] = str(reason.iloc[-1]) if len(reason) else ""
+    if "cycle_last_phase" in df_cycle.columns:
+        lp = df_cycle["cycle_last_phase"].dropna()
+        stats["cycle_last_phase"] = str(lp.iloc[-1]) if len(lp) else ""
+    if "cycle_next_state" in df_cycle.columns:
+        ns = df_cycle["cycle_next_state"].dropna()
+        stats["cycle_next_state"] = int(ns.iloc[-1]) if len(ns) else pd.NA
+
     return stats
 
 

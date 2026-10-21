@@ -248,6 +248,58 @@ class TestContinuousCycleNumbering(unittest.TestCase):
         self.assertEqual(max_cycle, 2)
 
 
+class TestOscillatorPartialCycles(unittest.TestCase):
+    def _run(self, states, voltages, smooth_window=20):
+        from optical_trap_tidy import find_routine_segments, label_cycles
+
+        df = _make_tidy_df(states, voltages)
+        df = find_routine_segments(df)
+        df = label_cycles(df, smooth_window=smooth_window)
+        return df
+
+    def test_truncated_cycle_after_complete_is_kept_and_flagged(self):
+        full_v = _oscillator_voltage_block(n_per_phase=100)
+        full_s = [4] * 100 + [3] * 20 + [4] * 100 + [3] * 100
+
+        # partial: pull_out + short hold + incomplete pull_in, then state 2 break
+        partial_v = (
+            list(np.linspace(9.0, 5.6, 100))
+            + [5.6] * 20
+            + list(np.linspace(5.6, 8.1, 50))
+        )
+        partial_s = [4] * 100 + [3] * 20 + [4] * 50
+
+        states = full_s + partial_s + [2] * 5
+        voltages = full_v + partial_v + [8.1] * 5
+        df = self._run(states, voltages, smooth_window=15)
+
+        osc = df[df["mode"] == "oscillator"].copy()
+        complete_ids = sorted(osc[osc["cycle_complete"] == True]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
+        partial_ids = sorted(osc[osc["cycle_complete"] == False]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
+        self.assertEqual(complete_ids, [1])
+        self.assertGreaterEqual(len(partial_ids), 1)
+        self.assertIn("partial_truncated", set(osc["cycle_status"].dropna().tolist()))
+        self.assertEqual(int(((df["state_code"].isin([3, 4])) & (df["cycle"].isna())).sum()), 0)
+
+    def test_end_of_file_partial_cycle_is_marked(self):
+        full_v = _oscillator_voltage_block(n_per_phase=100)
+        full_s = [4] * 100 + [3] * 20 + [4] * 100 + [3] * 100
+
+        # EOF partial: pull_out then hold, file ends before pull_in/last hold
+        partial_v = list(np.linspace(9.0, 5.6, 100)) + [5.6] * 30
+        partial_s = [4] * 100 + [3] * 30
+
+        states = full_s + partial_s
+        voltages = full_v + partial_v
+        df = self._run(states, voltages, smooth_window=15)
+
+        osc = df[df["mode"] == "oscillator"].copy()
+        partial = osc[osc["cycle_complete"] == False]  # noqa: E712
+        self.assertGreater(len(partial), 0)
+        self.assertIn("partial_end_of_file", set(partial["cycle_status"].dropna().tolist()))
+        self.assertEqual(int(((df["state_code"].isin([3, 4])) & (df["cycle"].isna())).sum()), 0)
+
+
 class TestValidMask(unittest.TestCase):
     """Tests for apply_valid_mask."""
 
@@ -475,6 +527,10 @@ class TestRegressionTether1_1(unittest.TestCase):
         # setpoint_v should be numeric (not all NaN) for hold rows
         self.assertFalse(hold_rows["setpoint_v"].isna().all())
 
+    def test_no_partial_cycles(self):
+        osc = self.df[self.df["mode"] == "oscillator"]
+        self.assertFalse((osc["cycle_complete"] == False).any())  # noqa: E712
+
 
 class TestRegressionTether1_2(unittest.TestCase):
     @classmethod
@@ -498,6 +554,19 @@ class TestRegressionTether1_2(unittest.TestCase):
 
     def test_no_force_extension(self):
         self.assertEqual(self.summary["n_force_extension_pulls"], 0)
+
+    def test_no_partial_cycles(self):
+        from optical_trap_tidy import load_tidy, find_routine_segments, label_cycles
+
+        repo_root = Path(__file__).resolve().parents[1]
+        path = repo_root / "example_data" / "tether1_2.dat"
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            df = load_tidy(path)
+        df = find_routine_segments(df)
+        df = label_cycles(df)
+        osc = df[df["mode"] == "oscillator"]
+        self.assertFalse((osc["cycle_complete"] == False).any())  # noqa: E712
 
 
 class TestRegressionTether1Final(unittest.TestCase):
@@ -529,6 +598,18 @@ class TestRegressionTether1Final(unittest.TestCase):
         glitch_rows = self.df[(self.df["state_code"] == 2) & (~self.df["valid"])]
         self.assertGreater(len(glitch_rows), 0)
 
+    def test_partial_cycles_present_and_complete_numbers_preserved(self):
+        osc = self.df[self.df["mode"] == "oscillator"].copy()
+        complete_ids = sorted(osc[osc["cycle_complete"] == True]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
+        partial_ids = sorted(osc[osc["cycle_complete"] == False]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
+        self.assertEqual(complete_ids, list(range(1, 11)))
+        self.assertGreaterEqual(len(partial_ids), 2)
+        self.assertIn("partial_truncated", set(osc["cycle_status"].dropna().tolist()))
+
+    def test_no_state3_or_state4_left_without_cycle(self):
+        unassigned = (self.df["state_code"].isin([3, 4])) & (self.df["cycle"].isna())
+        self.assertEqual(int(unassigned.sum()), 0)
+
 
 class TestOscillatorAnalyzer(unittest.TestCase):
     """Smoke test for the oscillator analyzer on synthetic data."""
@@ -555,6 +636,8 @@ class TestOscillatorAnalyzer(unittest.TestCase):
         self.assertIn("cycle", stats.columns)
         self.assertIn("period_s", stats.columns)
         self.assertIn("pull_out_duration_s", stats.columns)
+        self.assertIn("cycle_status", stats.columns)
+        self.assertIn("cycle_complete", stats.columns)
 
         with tempfile.TemporaryDirectory() as tmp:
             import matplotlib.pyplot as plt
