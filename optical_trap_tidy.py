@@ -1314,6 +1314,164 @@ def extract_reference_data(
 
 
 # ---------------------------------------------------------------------------
+# Rupture detection (Task C.6)
+# ---------------------------------------------------------------------------
+
+
+def detect_rupture_events(
+    df: pd.DataFrame,
+    *,
+    threshold_pn: float = 5.0,
+    n_samples: int = 100,
+) -> pd.DataFrame:
+    """Detect rupture events for each 'broke' pull attempt.
+
+    Scans the ``pull_out`` phase of every broke attempt for the last valid
+    sample before the force drops by more than *threshold_pn* within
+    *n_samples* consecutive samples.  The frame immediately before the first
+    such drop is taken as the rupture point.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode, after force computation and
+        outcome labelling).
+    threshold_pn:
+        Force drop required to identify a rupture (pN).
+    n_samples:
+        Window of samples to check for the drop.
+
+    Returns
+    -------
+    DataFrame with one row per broke attempt.  Columns:
+    ``fe_attempt``, ``rupture_time_s``, ``rupture_force_pn``,
+    ``rupture_extension_nm``.
+    """
+    records: list[dict[str, Any]] = []
+
+    force = df["force_pn"].to_numpy(dtype=float)
+    ext = df["extension_nm"].to_numpy(dtype=float) if "extension_nm" in df.columns else np.full(len(df), np.nan)
+    t = df["time_s"].to_numpy(dtype=float)
+    phase_col = df["phase"].to_numpy(dtype=object)
+    outcome_col = df["outcome"].to_numpy(dtype=object) if "outcome" in df.columns else np.full(len(df), None, dtype=object)
+    fe_col = df["fe_attempt"].to_numpy(dtype=object)
+    valid_col = df["valid"].to_numpy(dtype=bool) if "valid" in df.columns else np.ones(len(df), dtype=bool)
+
+    unique_attempts = sorted(
+        set(int(a) for a in fe_col if a is not pd.NA and a is not None)
+    )
+    for attempt in unique_attempts:
+        attempt_mask = np.array(
+            [a is not pd.NA and a is not None and int(a) == attempt for a in fe_col],
+            dtype=bool,
+        )
+        # Only process broke attempts
+        attempt_outcomes = outcome_col[attempt_mask]
+        if not any(
+            o is not None and o is not pd.NA and o == "broke"
+            for o in attempt_outcomes
+        ):
+            continue
+
+        pull_mask = attempt_mask & (phase_col == "pull_out") & valid_col
+        idx = np.where(pull_mask)[0]
+        if len(idx) < 2:
+            continue
+
+        # Search for the last valid sample before a drop of > threshold_pn
+        # within n_samples frames
+        pull_force = force[idx]
+        rupture_i = None
+        for j in range(len(idx) - 1, 0, -1):
+            lo = max(0, j - n_samples)
+            window = pull_force[lo:j + 1]
+            fin = window[np.isfinite(window)]
+            if len(fin) >= 2 and (np.nanmax(fin) - fin[-1]) >= threshold_pn:
+                # Drop detected; the last valid sample above this drop is j
+                rupture_i = idx[j]
+                break
+
+        if rupture_i is not None:
+            records.append(
+                {
+                    "fe_attempt": attempt,
+                    "rupture_time_s": float(t[rupture_i]),
+                    "rupture_force_pn": float(force[rupture_i]),
+                    "rupture_extension_nm": float(ext[rupture_i]),
+                }
+            )
+
+    return pd.DataFrame(records)
+
+
+def extract_attempt_summary(
+    df: pd.DataFrame,
+    *,
+    rupture_threshold_pn: float = 5.0,
+    rupture_n_samples: int = 100,
+) -> pd.DataFrame:
+    """Return a per-attempt summary for tether-detection runs.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode, after force computation and
+        outcome labelling).
+    rupture_threshold_pn, rupture_n_samples:
+        Forwarded to :func:`detect_rupture_events`.
+
+    Returns
+    -------
+    DataFrame with one row per pull attempt.  Columns: ``fe_attempt``,
+    ``outcome``, ``peak_force_pn``, ``max_extension_nm``,
+    ``rupture_time_s``, ``rupture_force_pn``, ``rupture_extension_nm``,
+    ``source``, ``tether_id``.
+    """
+    td_mask = df["mode"] == "tether_detection"
+    td_df = df[td_mask]
+    pull_df = td_df[td_df["phase"] == "pull_out"]
+    if len(pull_df) == 0:
+        return pd.DataFrame()
+
+    ruptures = detect_rupture_events(
+        td_df,
+        threshold_pn=rupture_threshold_pn,
+        n_samples=rupture_n_samples,
+    )
+    rup_by_attempt = ruptures.set_index("fe_attempt") if len(ruptures) else pd.DataFrame()
+
+    source = df["source"].iloc[0] if "source" in df.columns else ""
+    tid = df["tether_id"].iloc[0] if "tether_id" in df.columns else ""
+
+    rows = []
+    for attempt_val, grp in pull_df.groupby(pull_df["fe_attempt"].dropna().astype(int)):
+        valid_grp = grp[grp["valid"].astype(bool)] if "valid" in grp.columns else grp
+        outcome = grp["outcome"].iloc[0] if "outcome" in grp.columns else None
+        peak_force = float(valid_grp["force_pn"].dropna().max()) if "force_pn" in valid_grp.columns else np.nan
+        max_ext = float(valid_grp["extension_nm"].dropna().max()) if "extension_nm" in valid_grp.columns else np.nan
+
+        row: dict[str, Any] = {
+            "fe_attempt": int(attempt_val),
+            "outcome": outcome,
+            "peak_force_pn": peak_force,
+            "max_extension_nm": max_ext,
+            "rupture_time_s": np.nan,
+            "rupture_force_pn": np.nan,
+            "rupture_extension_nm": np.nan,
+            "source": source,
+            "tether_id": tid,
+        }
+        if len(rup_by_attempt) and attempt_val in rup_by_attempt.index:
+            rrow = rup_by_attempt.loc[attempt_val]
+            row["rupture_time_s"] = float(rrow["rupture_time_s"])
+            row["rupture_force_pn"] = float(rrow["rupture_force_pn"])
+            row["rupture_extension_nm"] = float(rrow["rupture_extension_nm"])
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # load_many
 # ---------------------------------------------------------------------------
 
@@ -1525,6 +1683,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="Apply edge-tracking correction before analysis (default: off).",
     )
+    # Tether / provenance flags (Task C.5)
+    parser.add_argument("--date", default=None,
+                        help="Experiment date (YYYYMMDD or YYYY-MM-DD) for tether ID generation.")
+    parser.add_argument("--bead", type=int, default=None,
+                        help="Bead number for tether ID generation.")
+    parser.add_argument("--tether-id", default=None,
+                        help="Explicit tether ID (overrides --date/--bead auto-generation).")
+    parser.add_argument("--link-previous", action="store_true", default=False,
+                        help="Attempt to link to the most recent active tether for this folder/bead.")
+    parser.add_argument("--target", default=None,
+                        help="Output directory for tethers.csv, provenance.json, session manifest.")
+    parser.add_argument("--registry", default=None,
+                        help="Path to the tether registry CSV file.")
     return parser
 
 
@@ -1537,8 +1708,48 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: no input files found.", file=sys.stderr)
         return 1
 
+    # ------------------------------------------------------------------ #
+    # Resolve tether metadata (Task C.5)                                   #
+    # ------------------------------------------------------------------ #
+    tether_id: str | None = args.tether_id
+    metadata_source: dict[str, str] = {}
+    date_val: str | None = None
+    bead_val: int | None = None
+
+    if tether_id is None:
+        date_val = args.date
+        bead_val = args.bead
+        is_tty = sys.stdin.isatty()
+
+        if date_val is None and is_tty:
+            try:
+                date_val = input("Experiment date (YYYYMMDD): ").strip() or None
+                metadata_source["date"] = "prompt"
+            except EOFError:
+                pass
+        else:
+            metadata_source["date"] = "flag" if date_val is not None else "missing"
+
+        if bead_val is None and is_tty:
+            try:
+                bv = input("Bead number: ").strip()
+                bead_val = int(bv) if bv else None
+                metadata_source["bead"] = "prompt"
+            except (EOFError, ValueError):
+                pass
+        else:
+            metadata_source["bead"] = "flag" if bead_val is not None else "missing"
+
+    # ------------------------------------------------------------------ #
+    # Determine output target directory                                    #
+    # ------------------------------------------------------------------ #
+    target_dir: Path | None = Path(args.target) if args.target else None
+    if target_dir is not None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+
     frames: list[pd.DataFrame] = []
     summaries: list[dict[str, Any]] = []
+    manifest_entries: list[dict[str, Any]] = []
 
     mode_name = {"oscillator": "oscillator", "tether-detection": "tether_detection"}[args.mode]
     for fpath in fpaths:
@@ -1582,8 +1793,63 @@ def main(argv: list[str] | None = None) -> int:
                 if force_ref_method in ("measure_ref",):
                     df = label_tether_detection_outcomes(df)
 
+            # ---------------------------------------------------------- #
+            # Tether / provenance metadata on rows (Task C.5)            #
+            # ---------------------------------------------------------- #
+            file_tether_id = tether_id  # may be None if not supplied
+            if file_tether_id is not None:
+                df["tether_id"] = file_tether_id
+            if bead_val is not None:
+                df["bead"] = bead_val
+            if date_val is not None:
+                df["date"] = date_val
+
+            manifest_entries.append({"source_file": str(fpath), "tether_id": file_tether_id})
+
             frames.append(df)
             summaries.append(summarize_run(df))
+
+            # ---------------------------------------------------------- #
+            # Tether-detection outputs (Task C.7)                         #
+            # ---------------------------------------------------------- #
+            if mode_name == "tether_detection" and target_dir is not None:
+                stem = Path(fpath).stem
+                # Attempts CSV
+                if "phase" in df.columns and (df["phase"] == "pull_out").any():
+                    att_df = extract_attempt_summary(df)
+                    att_path = target_dir / f"{stem}_attempts.csv"
+                    att_df.to_csv(att_path, index=False)
+                    print(f"  Attempts CSV written to {att_path}")
+
+                # Force-extension figure
+                if "force_pn" in df.columns and not df["force_pn"].isna().all():
+                    try:
+                        import matplotlib
+                        matplotlib.use("Agg")
+                        import matplotlib.pyplot as plt
+                        fe_curves = extract_fe_curves(df)
+                        if len(fe_curves):
+                            fig, ax = plt.subplots(figsize=(8, 5))
+                            for att_id, grp in fe_curves.groupby("fe_attempt"):
+                                po = grp[grp["phase"] == "pull_out"]
+                                relax = grp[grp["phase"] == "relax"]
+                                ax.plot(po["extension_nm"], po["force_pn"],
+                                        color="steelblue", lw=0.8, alpha=0.7,
+                                        label="pull_out" if att_id == fe_curves["fe_attempt"].iloc[0] else "")
+                                ax.plot(relax["extension_nm"], relax["force_pn"],
+                                        color="coral", lw=0.8, alpha=0.7,
+                                        label="relax" if att_id == fe_curves["fe_attempt"].iloc[0] else "")
+                            ax.set_xlabel("Extension (nm)")
+                            ax.set_ylabel("Force (pN)")
+                            ax.set_title(f"Force-extension: {stem}")
+                            ax.legend(loc="upper left")
+                            fig_path = target_dir / f"{stem}_fe_curves.png"
+                            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+                            plt.close(fig)
+                            print(f"  Force-extension figure written to {fig_path}")
+                    except Exception as fig_exc:  # noqa: BLE001
+                        print(f"  Warning: could not write FE figure: {fig_exc}", file=sys.stderr)
+
         except Exception as exc:
             print(f"Error processing {fpath}: {exc}", file=sys.stderr)
             return 1
@@ -1598,6 +1864,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{s['n_oscillator_cycles']:>10}"
         )
 
+    # ------------------------------------------------------------------ #
+    # Tidy output file                                                     #
+    # ------------------------------------------------------------------ #
     if args.output and frames:
         all_df = pd.concat(frames, ignore_index=True)
         out = Path(args.output)
@@ -1613,6 +1882,64 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         print(f"\nTidy output written to {out}")
+
+    # ------------------------------------------------------------------ #
+    # Provenance and session manifest (Task C.5)                          #
+    # ------------------------------------------------------------------ #
+    if target_dir is not None and frames:
+        try:
+            from optical_trap_tethers import (
+                make_provenance_entry,
+                write_provenance,
+                write_session_manifest,
+                TetherRegistry,
+                generate_tether_id,
+            )
+            processing_id = str(__import__("uuid").uuid4())
+
+            # Session manifest
+            manifest_path = target_dir / "session_manifest.json"
+            write_session_manifest(manifest_entries, manifest_path)
+            print(f"\nSession manifest written to {manifest_path}")
+
+            # Provenance
+            params = {
+                "mode": args.mode,
+                "k_per_mw": args.k_per_mw,
+                "cal_file": str(args.cal_file) if args.cal_file else None,
+                "force_ref": args.force_ref,
+                "force_ref_frames": args.force_ref_frames,
+                "force_ref_nm": args.force_ref_nm,
+                "edge_correction": args.edge_correction,
+                "metadata_source": metadata_source,
+            }
+            for fpath in fpaths:
+                entry = make_provenance_entry(
+                    source_file=str(fpath),
+                    parameters=params,
+                    tether_ids=[tether_id] if tether_id else [],
+                    processing_id=processing_id,
+                )
+                write_provenance(entry, target_dir / "provenance.json")
+            print(f"Provenance written to {target_dir / 'provenance.json'}")
+
+            # Registry
+            if args.registry and date_val and bead_val is not None:
+                reg = TetherRegistry(args.registry)
+                for fpath in fpaths:
+                    reg.create_tether(
+                        date_val,
+                        bead_val,
+                        str(Path(fpath).parent),
+                        source_file=str(fpath),
+                        fe_attempt=None,
+                        target=args.target or "",
+                        processing_id=processing_id,
+                    )
+                reg.save()
+                print(f"Tether registry updated at {args.registry}")
+        except Exception as prov_exc:  # noqa: BLE001
+            print(f"Warning: could not write provenance/manifest: {prov_exc}", file=sys.stderr)
 
     return 0
 

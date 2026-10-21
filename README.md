@@ -230,6 +230,95 @@ These show the output format for both an example trace with no detected discrete
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
 
+## Analysis CLI tools (`optical_trap_tidy.py` and `optical_trap_oscillator.py`)
+
+### `--mode` (required)
+
+Both CLIs require an explicit `--mode` flag.  No default is assumed:
+
+```bash
+python optical_trap_tidy.py run.dat --mode oscillator
+python optical_trap_tidy.py run.dat --mode tether-detection
+```
+
+- `oscillator` – expects states 3 (hold) and 4 (ramp).  Assigns `pull_out` /
+  `pull_in` / `hold` phases from the state column; state 4 with falling voltage
+  is `pull_out`, state 4 with rising voltage is `pull_in`.  If a state other
+  than 3 or 4 appears inside an oscillator segment it is flagged and its time
+  is printed.
+- `tether-detection` – expects states 23–27 and 29.
+
+### Folder input
+
+Pass a folder instead of individual files to process all top-level `.dat` files
+in that folder (no recursion).  `_Voltage.dat` and `_params.dat` files are
+skipped automatically:
+
+```bash
+python optical_trap_tidy.py /path/to/data_folder/ --mode oscillator
+```
+
+### Edge-tracking correction (`--edge-correction`)
+
+Off by default.  Applies the full edge-tracking correction described in the
+issue to clean up sentinel values and systematic mis-tracking artefacts:
+
+```bash
+python optical_trap_tidy.py run.dat --mode oscillator --edge-correction
+```
+
+When enabled:
+- Raw edges are preserved as `edge1_raw_nm` … `edge4_raw_nm`.
+- Corrected flag per frame is added as `edge_flag_trap1`, `edge_flag_trap2`,
+  `edge_flag` with values `none`, `A_width_fill`, `B_interp`, `B_width_fill`,
+  `unrecoverable`.
+- `unrecoverable` frames are treated as invalid by `apply_valid_mask`.
+- The per-run summary reports the count and fraction of corrected frames.
+
+### Tether ID and provenance flags
+
+```bash
+python optical_trap_tidy.py run.dat --mode oscillator \
+    --date 20261008 --bead 2 \
+    --target /path/to/output/ \
+    --registry /path/to/tethers.csv
+```
+
+| Flag | Description |
+|---|---|
+| `--date YYYYMMDD` | Experiment date for tether ID generation.  Prompted if stdin is a TTY and this flag is omitted. |
+| `--bead N` | Bead number.  Prompted if stdin is a TTY and omitted. |
+| `--tether-id ID` | Explicit tether ID (overrides auto-generation from date + bead). |
+| `--link-previous` | Link to the most recent active tether for this folder/bead. |
+| `--target DIR` | Output directory for tethers.csv, provenance.json, session manifest. |
+| `--registry FILE` | Path to the tether registry CSV. |
+
+When `--target` is supplied, the following files are written:
+
+- `<target>/session_manifest.json` – lists the processed files and their tether IDs.
+- `<target>/provenance.json` – per-file provenance entry with code version, package versions, and all analysis parameters.
+- For tether-detection mode: `<stem>_attempts.csv` and `<stem>_fe_curves.png`.
+
+### Calibration file format
+
+Pass a JSON or YAML file with `--cal-file`:
+
+```json
+{
+    "k_per_mw": 7.95e-5
+}
+```
+
+Or supply the value directly:
+
+```bash
+python optical_trap_tidy.py run.dat --mode oscillator --k-per-mw 7.95e-5
+```
+
+`k_per_mw` is the trap-1 stiffness in pN/nm/mW.  Do **not** hard-code the
+value 6.94e-5 from the test fixture; use the value from a recent calibration
+fit (≈ 7.95e-5 based on a re-fit of the instrument data).
+
 ## License
 
 This project is provided as-is for optical trap calibration workflows.
