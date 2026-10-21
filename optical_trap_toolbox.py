@@ -24,7 +24,6 @@ NORMALIZED_SCHEMA = (
 )
 
 FORCE_EXTENSION_STATE = 29  # state 29 is the actual tether force-extension pull
-_LEGACY_FORCE_EXTENSION_STATE = 27  # kept for backward-compatibility
 
 
 # ---------------------------------------------------------------------------

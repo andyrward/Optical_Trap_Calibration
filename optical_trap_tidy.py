@@ -83,8 +83,10 @@ TETHER_DETECTION_STATES: frozenset[int] = frozenset(
      TETHER_RELAX_STATE, TETHER_REFERENCE_STATE, TETHER_PULL_STATE,
      TETHER_STOP_STATE}
 )
-# Legacy alias – kept for any external callers that import this name
-FORCE_EXTENSION_STATE = TETHER_REFERENCE_STATE
+# Legacy alias – kept for any external callers that import this name.
+# The canonical pull state is the actual force-extension pull (29), not the
+# reference hold (27).
+FORCE_EXTENSION_STATE = TETHER_PULL_STATE
 
 # Minimum number of samples a run must have to be considered real (not a
 # single-sample glitch during pattern matching).
@@ -586,7 +588,6 @@ class TetherDetectionMode(ModeSpec):
 
         # State-27 runs get the fe_attempt of the *next* (upcoming) pull.
         # Walk forward to find the next pull attempt for each reference run.
-        next_attempt = attempt + 1  # default sentinel (no pull follows)
         _next_by_position = np.full(n, pd.NA, dtype=object)
         current_next = pd.NA
         for i in range(len(run_codes) - 1, -1, -1):
@@ -744,16 +745,20 @@ def _setpoint_voltages(voltage: np.ndarray, phase: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def find_routine_segments(df: pd.DataFrame) -> pd.DataFrame:
-    """Annotate the ``mode`` column using all registered mode detectors.
-
-    Raises a warning (not an error) when a sample matches more than one mode;
-    the first-registered mode wins and a ``mode_conflict`` note is logged.
+def find_routine_segments(
+    df: pd.DataFrame,
+    mode: str | None = None,
+) -> pd.DataFrame:
+    """Annotate the ``mode`` column using the requested detector set.
 
     Parameters
     ----------
     df:
         Tidy DataFrame (as returned by :func:`load_tidy`).
+    mode:
+        Optional mode name to restrict detection. Supported values are
+        ``"oscillator"``, ``"tether_detection"``, and ``None`` for the
+        default all-detector behaviour.
 
     Returns
     -------
@@ -762,9 +767,12 @@ def find_routine_segments(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     n = len(df)
     mode_arr = np.full(n, "other", dtype=object)
-    conflict_arr = np.zeros(n, dtype=bool)
 
-    for spec in MODE_REGISTRY.specs():
+    specs = MODE_REGISTRY.specs()
+    if mode is not None:
+        specs = [spec for spec in specs if spec.name == mode]
+
+    for spec in specs:
         state_codes = df["state_code"].to_numpy(dtype=float)
         actuation_codes = df["actuation_state_code"].to_numpy(dtype=float)
         time = df["time_s"].to_numpy(dtype=float)
@@ -772,12 +780,11 @@ def find_routine_segments(df: pd.DataFrame) -> pd.DataFrame:
         for start, end in segments:
             seg_mask = np.zeros(n, dtype=bool)
             seg_mask[start : end + 1] = True
-            # Where already assigned to a different mode → conflict
             already_assigned = mode_arr != "other"
             conflict = seg_mask & already_assigned & (mode_arr != spec.name)
             if conflict.any():
                 conflict_idxs = np.where(conflict)[0]
-                for ci in conflict_idxs[:5]:  # log first 5
+                for ci in conflict_idxs[:5]:
                     logger.warning(
                         "Sample %d matches both '%s' and '%s'; keeping '%s'",
                         ci,
@@ -785,7 +792,6 @@ def find_routine_segments(df: pd.DataFrame) -> pd.DataFrame:
                         spec.name,
                         mode_arr[ci],
                     )
-            # Assign only to samples not yet assigned
             new_assign = seg_mask & ~already_assigned
             mode_arr[new_assign] = spec.name
 
@@ -1266,27 +1272,6 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
     """Return a dict with pull counts and oscillator cycle counts for one run."""
     source = df["source"].iloc[0] if "source" in df.columns else "unknown"
 
-    n_fe_pulls = (
-        df[df["mode"] == "force_extension"]["cycle"]
-        .dropna()
-        .astype(int)
-        .max()
-        if (df["mode"] == "force_extension").any()
-        else 0
-    )
-    n_osc_cycles = (
-        df[df["mode"] == "oscillator"]["cycle"]
-        .dropna()
-        .astype(int)
-        .max()
-        if (df["mode"] == "oscillator").any()
-        else 0
-    )
-
-def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
-    """Return a dict with pull counts and oscillator cycle counts for one run."""
-    source = df["source"].iloc[0] if "source" in df.columns else "unknown"
-
     # Count tether-detection attempts (state-29 fe_attempts)
     td_mask = df["mode"] == "tether_detection"
     n_fe_pulls = 0
@@ -1409,10 +1394,11 @@ def main(argv: list[str] | None = None) -> int:
     frames: list[pd.DataFrame] = []
     summaries: list[dict[str, Any]] = []
 
+    mode_name = {"auto": None, "oscillator": "oscillator", "tether-detection": "tether_detection"}.get(args.mode)
     for fpath in args.files:
         try:
             df = load_tidy(fpath, k_per_mw=args.k_per_mw, cal_file=args.cal_file)
-            df = find_routine_segments(df)
+            df = find_routine_segments(df, mode=mode_name)
             df = label_cycles(df, dv_dt_threshold=args.dv_dt_threshold)
             df = apply_valid_mask(df)
 
