@@ -38,11 +38,11 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertEqual(len(runs), 6)
         self.assertEqual(len(inferred), 6)
         self.assertEqual(inferred[0].label, "tether_attempt_or_contact")
-        self.assertEqual(inferred[1].label, "reference_pull")
-        self.assertEqual(inferred[2].label, "force_extension")
-        self.assertEqual(inferred[3].label, "force_extension_subtether")
-        self.assertEqual(inferred[4].label, "oscillator_mode_three")
-        self.assertEqual(inferred[5].label, "oscillator_mode_four")
+        self.assertEqual(inferred[1].label, "approach")       # state 24
+        self.assertEqual(inferred[2].label, "measure_reference")  # state 27
+        self.assertEqual(inferred[3].label, "force_extension_subtether")  # state 31
+        self.assertEqual(inferred[4].label, "oscillator_hold")  # state 3
+        self.assertEqual(inferred[5].label, "oscillator_ramp")  # state 4
 
     def test_parse_matlab_sample_with_voltage_companion(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -97,7 +97,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
 
         self.assertEqual(report["total_states"], 6)
         self.assertEqual(report["total_runs"], 6)
-        self.assertEqual(report["summary"][0]["label"], "oscillator_mode_three")
+        self.assertEqual(report["summary"][0]["label"], "oscillator_hold")  # state 3
         self.assertEqual(report["summary"][0]["run_count"], 1)
         self.assertAlmostEqual(report["summary"][0]["total_duration_s"], 0.0)
 
@@ -152,11 +152,11 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertTrue(np.all(np.isnan(trace["power_mw"])))
 
     def test_force_extension_pull_count_and_intervals(self):
-        # Build a trace: state 21, then 3 pulls (state 27) separated by state 24.
+        # Build a trace: state 21, then 3 pulls (state 29) separated by state 24.
         # Pull durations span 3 samples; gaps span 2 samples.
         dt = 0.01
         states = np.array(
-            [21, 21, 27, 27, 27, 24, 24, 27, 27, 27, 24, 27, 27, 27, 21],
+            [21, 21, 29, 29, 29, 24, 24, 29, 29, 29, 24, 29, 29, 29, 21],
             dtype=int,
         )
         n = len(states)
@@ -179,7 +179,7 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
     def test_build_state_report_includes_pulls(self):
         trace = {
             "time_s": np.linspace(0.0, 9.0, 10),
-            "state_code": np.array([21, 21, 27, 27, 24, 24, 27, 27, 31, 31], dtype=float),
+            "state_code": np.array([21, 21, 29, 29, 24, 24, 29, 29, 31, 31], dtype=float),
         }
         report = build_state_report(trace)
         self.assertIn("pulls", report)

@@ -34,6 +34,10 @@ def _cycle_stats(df_cycle: pd.DataFrame) -> dict[str, Any]:
     """Compute statistics for a single oscillator cycle."""
     stats: dict[str, Any] = {}
 
+    # Drop invalid samples (edge spikes, glitches) before any statistics
+    if "valid" in df_cycle.columns:
+        df_cycle = df_cycle[df_cycle["valid"].astype(bool)]
+
     # sub-phase frames
     pull_out = df_cycle[df_cycle["phase"] == "pull_out"]
     pull_in = df_cycle[df_cycle["phase"] == "pull_in"]
@@ -156,6 +160,9 @@ def plot_oscillator(df: pd.DataFrame, stats: pd.DataFrame) -> plt.Figure:
         Per-cycle statistics as returned by :func:`analyze_oscillator`.
     """
     osc = df[df["mode"] == "oscillator"]
+    # Drop invalid samples (edge spikes, glitches) before plotting
+    if "valid" in osc.columns:
+        osc = osc[osc["valid"].astype(bool)]
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 10))
 

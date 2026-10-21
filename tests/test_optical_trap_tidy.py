@@ -140,13 +140,47 @@ class TestOscillatorPatternDetection(unittest.TestCase):
 
 
 class TestForceExtensionDetection(unittest.TestCase):
-    def test_three_pulls(self):
-        from optical_trap_tidy import ForceExtensionMode
+    def test_tether_detection_contiguous_block(self):
+        # A contiguous block of tether-detection states (24, 27, 29, 23) is
+        # one segment. States 21/21 before it are not in the TD set.
+        from optical_trap_tidy import TetherDetectionMode
 
+        # states: 21, 21 (non-TD), then 24/27/29 (TD) → 1 segment
         states = np.array([21, 21, 27, 27, 27, 24, 27, 27, 24, 27, 27], dtype=float)
-        spec = ForceExtensionMode()
+        spec = TetherDetectionMode()
         segs = spec.detect(states, np.zeros_like(states), np.arange(len(states), dtype=float))
-        self.assertEqual(len(segs), 3)
+        # All TD states (27 and 24) are contiguous → 1 segment
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0][0], 2)  # first 27 at index 2
+        self.assertEqual(segs[0][1], len(states) - 1)
+
+    def test_three_pull_out_runs_labeled(self):
+        # Three state-29 runs separated by state-27 reference holds.
+        from optical_trap_tidy import TetherDetectionMode, find_routine_segments, label_cycles
+
+        # 27 ref, 29 pull, 23 break, 27 ref, 29 pull, 23 break, 27 ref, 29, 26 relax
+        n_each = 10
+        states = (
+            [27] * n_each + [29] * n_each + [23] * n_each
+            + [27] * n_each + [29] * n_each + [23] * n_each
+            + [27] * n_each + [29] * n_each + [26] * n_each
+        )
+        voltages = [7.5] * len(states)
+        df = _make_tidy_df(states, voltages)
+        df = find_routine_segments(df)
+        df = label_cycles(df)
+        td = df[df["mode"] == "tether_detection"]
+        # All TD rows in one segment
+        self.assertFalse(td.empty)
+        # Three distinct fe_attempts
+        attempts = sorted(td["fe_attempt"].dropna().astype(int).unique().tolist())
+        self.assertEqual(attempts, [1, 2, 3])
+        # Phases
+        phases = set(td["phase"].dropna().unique())
+        self.assertIn("pull_out", phases)
+        self.assertIn("reference", phases)
+        self.assertIn("post_break", phases)
+        self.assertIn("relax", phases)
 
 
 class TestPhaseLabelling(unittest.TestCase):

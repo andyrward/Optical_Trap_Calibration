@@ -58,6 +58,7 @@ import pandas as pd
 from optical_trap_toolbox import (
     load_normalized_trace,
     segment_state_runs,
+    STATE_LABELS,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,22 @@ logger = logging.getLogger(__name__)
 
 OSCILLATOR_RAMP_STATE = 4
 OSCILLATOR_HOLD_STATE = 3
-FORCE_EXTENSION_STATE = 27
+# Tether-detection state codes
+TETHER_PULL_STATE = 29          # force-extension pull-out
+TETHER_RELAX_STATE = 26         # pull-to-reference / relax
+TETHER_REFERENCE_STATE = 27     # measure-reference hold
+TETHER_APPROACH_STATE = 24      # approach (no tether)
+TETHER_TOUCH_STATE = 25         # touch (bead–bead contact)
+TETHER_POST_BREAK_STATE = 23    # post-break / retry
+TETHER_STOP_STATE = 30          # stop-tether-detection
+# Set of all states belonging to the tether-detection workflow
+TETHER_DETECTION_STATES: frozenset[int] = frozenset(
+    {TETHER_POST_BREAK_STATE, TETHER_APPROACH_STATE, TETHER_TOUCH_STATE,
+     TETHER_RELAX_STATE, TETHER_REFERENCE_STATE, TETHER_PULL_STATE,
+     TETHER_STOP_STATE}
+)
+# Legacy alias – kept for any external callers that import this name
+FORCE_EXTENSION_STATE = TETHER_REFERENCE_STATE
 
 # Minimum number of samples a run must have to be considered real (not a
 # single-sample glitch during pattern matching).
@@ -245,9 +261,20 @@ def load_tidy(
             "phase": pd.NA,
             "setpoint_v": pd.NA,
             "valid": True,
+            # tether-detection columns (filled by label_cycles / compute_force_reference)
+            "fe_attempt": pd.NA,
+            "outcome": pd.NA,
+            "force_ref_nm": np.nan,
+            "force_ref_method": pd.NA,
+            # linking columns (filled by optical_trap_tethers)
+            "tether_id": pd.NA,
+            "bead": pd.NA,
+            "tether_number": pd.NA,
+            "processing_id": pd.NA,
         }
     )
     df["cycle"] = df["cycle"].astype(pd.Int64Dtype())
+    df["fe_attempt"] = df["fe_attempt"].astype(pd.Int64Dtype())
 
     return df
 
@@ -420,16 +447,48 @@ MODE_REGISTRY.register(OscillatorMode())
 
 
 # ---------------------------------------------------------------------------
-# Force-extension mode
+# Tether-detection mode
 # ---------------------------------------------------------------------------
 
 
-class ForceExtensionMode(ModeSpec):
-    """Detect contiguous runs of state 27 (force-extension pulls)."""
+class TetherDetectionMode(ModeSpec):
+    """Detect contiguous runs of tether-detection workflow states.
+
+    States in scope: 23 (post_break), 24 (approach), 25 (touch),
+    26 (pull_to_reference / relax), 27 (measure_reference), 29 (pull_out),
+    30 (stop_tether_detection).
+
+    Segment detection
+    -----------------
+    A segment is one or more contiguous tether-detection state runs, with
+    single-sample glitches of other states skipped (same rule as
+    OscillatorMode).
+
+    Phase labelling (label_cycles_segment)
+    ----------------------------------------
+    * state 29 → ``pull_out``; each state-29 run starts a new ``fe_attempt``.
+    * state 26 immediately after a state-29 run → ``relax``; same attempt.
+    * state 27 → ``reference``; the fe_attempt of the nearest following pull
+      is assigned, so references precede their pulls.
+    * state 24 → ``approach``
+    * state 25 → ``touch``
+    * state 23 → ``post_break``
+    * state 30 → ``stop``
+
+    ``outcome`` is set on state-29 rows only:
+    * ``survived``  – next tether-detection state after 29 is 26.
+    * ``broke``     – next tether-detection state after 29 is 23 and force
+                      exceeds the no-tether threshold at some point.
+    * ``no_tether`` – next tether-detection state after 29 is 23 and force
+                      never exceeds the threshold (force is NaN at this stage,
+                      so the label is refined by
+                      :func:`label_tether_detection_outcomes`).
+    * ``unknown``   – anything else.
+    """
 
     @property
     def name(self) -> str:
-        return "force_extension"
+        return "tether_detection"
 
     def detect(
         self,
@@ -437,8 +496,39 @@ class ForceExtensionMode(ModeSpec):
         actuation_codes: np.ndarray,
         time: np.ndarray,
     ) -> list[tuple[int, int]]:
-        runs = segment_state_runs(state_codes, state_code=FORCE_EXTENSION_STATE)
-        return [(r.start_idx, r.end_idx) for r in runs]
+        all_runs = segment_state_runs(state_codes)
+
+        def _is_td_run(r) -> bool:
+            return int(r.state_code) in TETHER_DETECTION_STATES
+
+        def _is_glitch(r) -> bool:
+            return (r.end_idx - r.start_idx + 1) < _MIN_PATTERN_SAMPLES
+
+        filtered: list = []
+        for r in all_runs:
+            if _is_td_run(r):
+                filtered.append(r)
+            elif _is_glitch(r):
+                continue
+            else:
+                filtered.append(None)
+
+        blocks: list[list] = []
+        current: list = []
+        for item in filtered:
+            if item is None:
+                if current:
+                    blocks.append(current)
+                    current = []
+            else:
+                current.append(item)
+        if current:
+            blocks.append(current)
+
+        segments: list[tuple[int, int]] = []
+        for block in blocks:
+            segments.append((block[0].start_idx, block[-1].end_idx))
+        return segments
 
     def label_cycles_segment(
         self,
@@ -447,16 +537,109 @@ class ForceExtensionMode(ModeSpec):
         smooth_window: int,
     ) -> pd.DataFrame:
         df_seg = df_seg.copy()
-        voltage = df_seg["voltage_v"].to_numpy(dtype=float)
-        phase_arr = _voltage_to_phase(voltage, dv_dt_threshold, smooth_window)
-        cycle_arr = _assign_fe_cycles(phase_arr)
+        states = df_seg["state_code"].to_numpy(dtype=float)
+
+        # Build phase array based on state code
+        _STATE_TO_PHASE: dict[int, str] = {
+            TETHER_PULL_STATE: "pull_out",
+            TETHER_RELAX_STATE: "relax",
+            TETHER_REFERENCE_STATE: "reference",
+            TETHER_APPROACH_STATE: "approach",
+            TETHER_TOUCH_STATE: "touch",
+            TETHER_POST_BREAK_STATE: "post_break",
+            TETHER_STOP_STATE: "stop",
+        }
+        n = len(df_seg)
+        phase_arr = np.array(
+            [_STATE_TO_PHASE.get(int(s), f"unknown_state_{int(s)}") for s in states],
+            dtype=object,
+        )
         df_seg["phase"] = phase_arr
-        df_seg["cycle"] = pd.array(cycle_arr, dtype=pd.Int64Dtype())
-        df_seg["setpoint_v"] = _setpoint_voltages(df_seg["voltage_v"].to_numpy(), phase_arr)
+
+        # fe_attempt: increments at each new state-29 run; shared with
+        # immediately following state-26 (relax).
+        state_runs = segment_state_runs(states)
+        # Index offset from df_seg.index[0] to array index
+        idx0 = df_seg.index[0]
+        fe_attempt_arr = np.full(n, pd.NA, dtype=object)
+        attempt = 0
+        # Track which array positions belong to which state run
+        run_codes = []
+        run_slices = []
+        for r in state_runs:
+            lo = r.start_idx
+            hi = r.end_idx + 1
+            run_codes.append(int(r.state_code))
+            run_slices.append((lo, hi))
+
+        # Assign fe_attempt: each state-29 run increments the counter.
+        # The following state-26 run gets the same attempt number.
+        for i, (code, (lo, hi)) in enumerate(zip(run_codes, run_slices)):
+            if code == TETHER_PULL_STATE:
+                attempt += 1
+                fe_attempt_arr[lo:hi] = attempt
+                # Check next run: if it's state 26 → relax for same attempt
+                if i + 1 < len(run_codes) and run_codes[i + 1] == TETHER_RELAX_STATE:
+                    lo2, hi2 = run_slices[i + 1]
+                    fe_attempt_arr[lo2:hi2] = attempt
+                    df_seg.iloc[lo2:hi2, df_seg.columns.get_loc("phase")] = "relax"
+
+        # State-27 runs get the fe_attempt of the *next* (upcoming) pull.
+        # Walk forward to find the next pull attempt for each reference run.
+        next_attempt = attempt + 1  # default sentinel (no pull follows)
+        _next_by_position = np.full(n, pd.NA, dtype=object)
+        current_next = pd.NA
+        for i in range(len(run_codes) - 1, -1, -1):
+            code, (lo, hi) = run_codes[i], run_slices[i]
+            if code == TETHER_PULL_STATE:
+                current_next = int(fe_attempt_arr[lo])
+            _next_by_position[lo:hi] = current_next
+        for i, (code, (lo, hi)) in enumerate(zip(run_codes, run_slices)):
+            if code == TETHER_REFERENCE_STATE:
+                fe_attempt_arr[lo:hi] = _next_by_position[lo:hi]
+
+        # Convert to Int64 array
+        int64_arr = pd.array(
+            [int(x) if x is not pd.NA and x is not None else pd.NA
+             for x in fe_attempt_arr],
+            dtype=pd.Int64Dtype(),
+        )
+        df_seg["fe_attempt"] = int64_arr
+
+        # outcome: set on pull_out rows based on the next state-detection run
+        outcome_arr = np.full(n, pd.NA, dtype=object)
+        for i, (code, (lo, hi)) in enumerate(zip(run_codes, run_slices)):
+            if code == TETHER_PULL_STATE:
+                # Find next tether-detection state run (skip non-TD states)
+                next_td_code = None
+                for j in range(i + 1, len(run_codes)):
+                    if run_codes[j] in TETHER_DETECTION_STATES:
+                        next_td_code = run_codes[j]
+                        break
+                if next_td_code == TETHER_RELAX_STATE:
+                    outcome_str = "survived"
+                elif next_td_code == TETHER_POST_BREAK_STATE:
+                    # broke or no_tether: resolved after force is computed
+                    outcome_str = "broke_or_no_tether"
+                else:
+                    outcome_str = "unknown"
+                outcome_arr[lo:hi] = outcome_str
+        df_seg["outcome"] = outcome_arr
+
+        # setpoint_v: NaN for all (force-extension has no held setpoint)
+        df_seg["setpoint_v"] = np.nan
+        # cycle: use fe_attempt as the cycle number for compatibility
+        df_seg["cycle"] = int64_arr
+
         return df_seg
 
 
-MODE_REGISTRY.register(ForceExtensionMode())
+MODE_REGISTRY.register(TetherDetectionMode())
+
+
+# Keep a public alias so external code can still refer to ForceExtensionMode.
+# It maps to the same tether_detection behaviour.
+ForceExtensionMode = TetherDetectionMode
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +870,13 @@ def label_cycles(
             df.loc[seg_indices, "cycle"] = shifted_cycle.to_numpy()
             df.loc[seg_indices, "phase"] = labelled["phase"].values
             df.loc[seg_indices, "setpoint_v"] = labelled["setpoint_v"].values
+            # Propagate tether-detection columns if the mode set them.
+            # fe_attempt uses the same values as cycle for TetherDetectionMode,
+            # so apply the same shift that was already computed for cycle.
+            if "fe_attempt" in labelled.columns:
+                df.loc[seg_indices, "fe_attempt"] = shifted_cycle.to_numpy()
+            if "outcome" in labelled.columns:
+                df.loc[seg_indices, "outcome"] = labelled["outcome"].values
 
     return df
 
@@ -736,6 +926,285 @@ def apply_valid_mask(
 
     df["valid"] = valid
     return df
+
+
+# ---------------------------------------------------------------------------
+# Force-from-reference helpers
+# ---------------------------------------------------------------------------
+
+
+def compute_force_reference(
+    df: pd.DataFrame,
+    method: str = "measure_ref",
+    force_ref_nm: float | None = None,
+    force_ref_frames: int = 100,
+) -> pd.DataFrame:
+    """Compute ``force_pn`` from a trap-1 position reference.
+
+    Sign convention: tether tension is positive.  Under tension the bead in
+    trap 1 is displaced *toward* the tether (toward higher ``trap1_pos_nm``
+    on the ``tether1_overstretch`` data), so force is positive when
+    ``trap1_pos_nm > ref_nm``.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (after :func:`find_routine_segments` and
+        :func:`label_cycles`). Must have ``stiffness_pn_per_nm``,
+        ``trap1_pos_nm``, ``phase``, ``fe_attempt``, and ``mode`` columns.
+    method:
+        ``"measure_ref"``   – use the mean trap1_pos_nm of the nearest
+                              preceding state-27 (measure_reference) hold for
+                              each pull-out attempt.  Default for tether-
+                              detection mode.
+        ``"high_hold_tail"`` – use the mean of the last *force_ref_frames*
+                              valid samples of each cycle's high-voltage hold
+                              phase.  Default for oscillator mode.
+        ``"fixed"``         – use a single fixed ``force_ref_nm`` value for
+                              all rows.
+    force_ref_nm:
+        Used only with method ``"fixed"``.  In nm.
+    force_ref_frames:
+        Number of frames from the tail of the high-voltage hold to average.
+        Used only with method ``"high_hold_tail"``.
+
+    Returns
+    -------
+    DataFrame with updated ``force_pn``, ``force_ref_nm`` and
+    ``force_ref_method`` columns.
+    """
+    df = df.copy()
+    trap1 = df["trap1_pos_nm"].to_numpy(dtype=float)
+    stiff = df["stiffness_pn_per_nm"].to_numpy(dtype=float)
+    n = len(df)
+
+    ref_col = np.full(n, np.nan)
+    ref_method_col = np.full(n, method, dtype=object)
+
+    if method == "fixed":
+        if force_ref_nm is None:
+            warnings.warn("method='fixed' requires force_ref_nm; leaving force_pn as NaN.", stacklevel=2)
+        else:
+            ref_col[:] = force_ref_nm
+
+    elif method == "measure_ref":
+        # For each fe_attempt, find the nearest preceding state-27 segment
+        # and use its mean trap1_pos_nm as the reference.
+        state_codes = df["state_code"].to_numpy(dtype=float)
+        fe_attempts = df["fe_attempt"].to_numpy(dtype=object)
+
+        # Build a mapping: fe_attempt → ref_nm from the nearest preceding ref
+        ref_nm_by_attempt: dict[int, float] = {}
+        ref_pos: list[tuple[int, float]] = []  # (last_row_idx, mean_trap1)
+        for run in segment_state_runs(state_codes):
+            if int(run.state_code) == TETHER_REFERENCE_STATE:
+                valid_mask = df["valid"].to_numpy(dtype=bool)
+                seg_trap1 = trap1[run.start_idx:run.end_idx + 1]
+                seg_valid = valid_mask[run.start_idx:run.end_idx + 1]
+                seg_finite = seg_trap1[seg_valid & np.isfinite(seg_trap1)]
+                if len(seg_finite):
+                    ref_pos.append((run.end_idx, float(np.mean(seg_finite))))
+
+        # For each attempt, find the nearest preceding reference (last ref_pos
+        # entry with end_idx < first row of this attempt).
+        for run in segment_state_runs(state_codes):
+            if int(run.state_code) == TETHER_PULL_STATE:
+                fe_val = fe_attempts[run.start_idx]
+                if fe_val is pd.NA or fe_val is None:
+                    continue
+                attempt_num = int(fe_val)
+                if attempt_num in ref_nm_by_attempt:
+                    continue
+                # Find the nearest preceding reference
+                best_ref = None
+                for ref_end_idx, ref_mean in ref_pos:
+                    if ref_end_idx < run.start_idx:
+                        best_ref = ref_mean
+                    else:
+                        break
+                if best_ref is not None:
+                    ref_nm_by_attempt[attempt_num] = best_ref
+
+        # Apply reference to all rows of each attempt
+        for i in range(n):
+            fe = fe_attempts[i]
+            if fe is not pd.NA and fe is not None:
+                a = int(fe)
+                if a in ref_nm_by_attempt:
+                    ref_col[i] = ref_nm_by_attempt[a]
+
+    elif method == "high_hold_tail":
+        # For each oscillator cycle, use the mean of the last force_ref_frames
+        # valid samples of the high-voltage hold (the "hold" phase at the top
+        # of the voltage ramp).
+        cycles = df["cycle"].to_numpy(dtype=object)
+        phase_col = df["phase"].to_numpy(dtype=object)
+        valid_mask = df["valid"].to_numpy(dtype=bool)
+
+        # Determine which hold is the "high" one per cycle: the hold with
+        # the higher mean voltage.
+        unique_cycles = sorted(
+            set(int(c) for c in cycles if c is not pd.NA and c is not None)
+        )
+        for cid in unique_cycles:
+            cmask = np.array(
+                [c is not pd.NA and c is not None and c == cid for c in cycles],
+                dtype=bool,
+            )
+            hold_mask = cmask & (phase_col == "hold") & valid_mask
+            if not hold_mask.any():
+                continue
+            hold_v = df["voltage_v"].to_numpy(dtype=float)
+            # Split hold samples into contiguous runs (may be two holds per cycle)
+            h_idx = np.where(hold_mask)[0]
+            if len(h_idx) == 0:
+                continue
+            hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+            hold_groups = np.split(h_idx, hold_breaks)
+            # High-voltage hold = group with higher mean voltage
+            hold_groups_sorted = sorted(
+                hold_groups,
+                key=lambda g: float(np.nanmean(hold_v[g])),
+                reverse=True,
+            )
+            high_hold_idx = hold_groups_sorted[0]
+            tail_idx = high_hold_idx[-force_ref_frames:]
+            ref_val = float(np.nanmean(trap1[tail_idx]))
+            ref_col[cmask] = ref_val
+
+    # Compute force: positive when trap1 displaced toward higher nm (tension)
+    force = (trap1 - ref_col) * stiff
+    finite_force = np.isfinite(force)
+    df["force_pn"] = np.where(finite_force, force, np.nan)
+    df["force_ref_nm"] = ref_col
+    df["force_ref_method"] = ref_method_col
+
+    return df
+
+
+def label_tether_detection_outcomes(
+    df: pd.DataFrame,
+    no_tether_threshold_pn: float = 3.0,
+) -> pd.DataFrame:
+    """Refine ``outcome`` for tether-detection attempts using computed force.
+
+    This function resolves the ``"broke_or_no_tether"`` label (set by
+    :class:`TetherDetectionMode`) into ``"broke"`` or ``"no_tether"`` based
+    on whether the peak force during the pull ever exceeded
+    *no_tether_threshold_pn*.
+
+    Call this **after** :func:`compute_force_reference`.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (after force computation).
+    no_tether_threshold_pn:
+        Minimum peak force (pN) during a pull that distinguishes a real
+        tether (``"broke"``) from no tether (``"no_tether"``).
+
+    Returns
+    -------
+    DataFrame with ``outcome`` refined.
+    """
+    df = df.copy()
+    if "outcome" not in df.columns:
+        return df
+
+    outcome = df["outcome"].to_numpy(dtype=object).copy()
+    force = df["force_pn"].to_numpy(dtype=float)
+    fe_attempts = df["fe_attempt"].to_numpy(dtype=object)
+
+    # Find unique attempts with "broke_or_no_tether"
+    bn_mask = outcome == "broke_or_no_tether"
+    if not bn_mask.any():
+        return df
+
+    for attempt_val in set(fe_attempts[bn_mask]):
+        if attempt_val is pd.NA or attempt_val is None:
+            continue
+        attempt_rows = np.array(
+            [i for i, a in enumerate(fe_attempts)
+             if a is not pd.NA and a is not None and a == attempt_val],
+            dtype=np.intp,
+        )
+        pull_rows = attempt_rows[outcome[attempt_rows] == "broke_or_no_tether"]
+        if len(pull_rows) == 0:
+            continue
+        pull_force = force[pull_rows]
+        finite = pull_force[np.isfinite(pull_force)]
+        if len(finite) and np.max(finite) > no_tether_threshold_pn:
+            new_outcome = "broke"
+        else:
+            new_outcome = "no_tether"
+        outcome[pull_rows] = new_outcome
+
+    df["outcome"] = outcome
+    return df
+
+
+def extract_fe_curves(
+    df: pd.DataFrame,
+    outcome: str | None = None,
+    tether_id: str | None = None,
+) -> pd.DataFrame:
+    """Return tidy pull-out and relax curves for tether-detection runs.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode, after force computation).
+    outcome:
+        If given, filter to attempts with this outcome (``"survived"``,
+        ``"broke"``, ``"no_tether"``, ``"unknown"``).
+    tether_id:
+        If given, filter to rows with this tether_id.
+
+    Returns
+    -------
+    DataFrame with columns ``source``, ``fe_attempt``, ``tether_id``,
+    ``phase``, ``time_s``, ``extension_nm``, ``force_pn``, ``voltage_v``.
+    """
+    mask = df["mode"] == "tether_detection"
+    sub = df[mask & df["phase"].isin(["pull_out", "relax"])].copy()
+
+    if outcome is not None:
+        # Attempt outcome is stored on pull_out rows; propagate to relax rows
+        attempt_outcome: dict[object, str] = {}
+        for _, row in sub[sub["phase"] == "pull_out"].iterrows():
+            if row["outcome"] is not pd.NA:
+                attempt_outcome[row["fe_attempt"]] = str(row["outcome"])
+        keep_attempts = {a for a, o in attempt_outcome.items() if o == outcome}
+        sub = sub[sub["fe_attempt"].apply(lambda a: a in keep_attempts)]
+
+    if tether_id is not None:
+        sub = sub[sub["tether_id"] == tether_id]
+
+    cols = ["source", "fe_attempt", "tether_id", "phase",
+            "time_s", "extension_nm", "force_pn", "voltage_v"]
+    present = [c for c in cols if c in sub.columns]
+    return sub[present].reset_index(drop=True)
+
+
+def extract_reference_data(
+    df: pd.DataFrame,
+    phase: str = "approach",
+) -> pd.DataFrame:
+    """Return no-tether reference data for a given phase.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame (tether-detection mode).
+    phase:
+        Phase label to extract (default ``"approach"`` for state-24 data).
+
+    Returns
+    -------
+    DataFrame filtered to the requested phase.
+    """
+    mask = (df["mode"] == "tether_detection") & (df["phase"] == phase)
+    return df[mask].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -800,9 +1269,45 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         else 0
     )
 
+def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
+    """Return a dict with pull counts and oscillator cycle counts for one run."""
+    source = df["source"].iloc[0] if "source" in df.columns else "unknown"
+
+    # Count tether-detection attempts (state-29 fe_attempts)
+    td_mask = df["mode"] == "tether_detection"
+    n_fe_pulls = 0
+    n_survived = 0
+    n_broke = 0
+    n_no_tether = 0
+    if td_mask.any():
+        td_df = df[td_mask]
+        pull_rows = td_df[td_df["phase"] == "pull_out"]
+        if len(pull_rows):
+            n_fe_pulls = int(pull_rows["fe_attempt"].dropna().astype(int).max())
+            if "outcome" in pull_rows.columns:
+                outcomes = pull_rows.groupby(
+                    pull_rows["fe_attempt"].dropna().astype(int)
+                )["outcome"].first()
+                n_survived = int((outcomes == "survived").sum())
+                n_broke = int((outcomes == "broke").sum())
+                n_no_tether = int((outcomes == "no_tether").sum())
+
+    n_osc_cycles = (
+        df[df["mode"] == "oscillator"]["cycle"]
+        .dropna()
+        .astype(int)
+        .max()
+        if (df["mode"] == "oscillator").any()
+        else 0
+    )
+
     return {
         "source": source,
-        "n_force_extension_pulls": int(n_fe_pulls) if pd.notna(n_fe_pulls) and n_fe_pulls else 0,
+        "n_force_extension_pulls": n_fe_pulls,
+        "n_tether_attempts": n_fe_pulls,
+        "n_survived": n_survived,
+        "n_broke": n_broke,
+        "n_no_tether": n_no_tether,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
     }
 
@@ -823,6 +1328,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "files",
         nargs="+",
         help="One or more .dat run files to process.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["oscillator", "tether-detection", "auto"],
+        default="auto",
+        help=(
+            "Analysis mode.  'oscillator' expects states 3/4; "
+            "'tether-detection' expects states 23/24/25/26/27/29/30; "
+            "'auto' uses all registered mode detectors (default)."
+        ),
     )
     parser.add_argument(
         "--k-per-mw",
@@ -849,6 +1364,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=0.0003,
         help="dV/dt threshold (V/sample) for hold/ramp phase discrimination.",
     )
+    parser.add_argument(
+        "--force-ref",
+        choices=["measure_ref", "high_hold_tail", "fixed"],
+        default=None,
+        help=(
+            "Force reference method.  Default: 'measure_ref' for "
+            "tether-detection; 'high_hold_tail' for oscillator."
+        ),
+    )
+    parser.add_argument(
+        "--force-ref-nm",
+        type=float,
+        default=None,
+        help="Fixed reference position for --force-ref fixed (nm).",
+    )
+    parser.add_argument(
+        "--force-ref-frames",
+        type=int,
+        default=100,
+        help="Number of tail frames for --force-ref high_hold_tail.",
+    )
     return parser
 
 
@@ -865,17 +1401,42 @@ def main(argv: list[str] | None = None) -> int:
             df = find_routine_segments(df)
             df = label_cycles(df, dv_dt_threshold=args.dv_dt_threshold)
             df = apply_valid_mask(df)
+
+            # Determine force reference method
+            force_ref_method = args.force_ref
+            if force_ref_method is None:
+                has_td = (df["mode"] == "tether_detection").any()
+                has_osc = (df["mode"] == "oscillator").any()
+                if has_td:
+                    force_ref_method = "measure_ref"
+                elif has_osc:
+                    force_ref_method = "high_hold_tail"
+
+            if force_ref_method and not df["stiffness_pn_per_nm"].isna().all():
+                df = compute_force_reference(
+                    df,
+                    method=force_ref_method,
+                    force_ref_nm=args.force_ref_nm,
+                    force_ref_frames=args.force_ref_frames,
+                )
+                if force_ref_method in ("measure_ref",):
+                    df = label_tether_detection_outcomes(df)
+
             frames.append(df)
             summaries.append(summarize_run(df))
         except Exception as exc:
             print(f"Error processing {fpath}: {exc}", file=sys.stderr)
             return 1
 
-    # print per-run summary: pulls first, then oscillator cycles
-    print(f"{'Source':<30} {'FE_pulls':>8} {'Osc_cycles':>10}")
-    print("-" * 52)
+    # print per-run summary
+    print(f"{'Source':<30} {'FE_attempts':>11} {'Survived':>8} {'Broke':>6} {'Osc_cycles':>10}")
+    print("-" * 69)
     for s in summaries:
-        print(f"{s['source']:<30} {s['n_force_extension_pulls']:>8} {s['n_oscillator_cycles']:>10}")
+        print(
+            f"{s['source']:<30} {s['n_tether_attempts']:>11} "
+            f"{s['n_survived']:>8} {s['n_broke']:>6} "
+            f"{s['n_oscillator_cycles']:>10}"
+        )
 
     if args.output and frames:
         all_df = pd.concat(frames, ignore_index=True)
