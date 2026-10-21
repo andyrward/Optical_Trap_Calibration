@@ -23,18 +23,38 @@ NORMALIZED_SCHEMA = (
     "power_mw",
 )
 
-FORCE_EXTENSION_STATE = 27
+FORCE_EXTENSION_STATE = 29  # state 29 is the actual tether force-extension pull
 
 
-STATE_CODE_HINTS: dict[int, str] = {
-    3: "oscillator_mode_three",
-    4: "oscillator_mode_four",
+# ---------------------------------------------------------------------------
+# Canonical state-label table.  All known column-6 state codes are listed
+# here.  Unknown codes keep the label "unknown_state_N" at call sites.
+# To add a new code, add one entry to this dict.
+# ---------------------------------------------------------------------------
+STATE_LABELS: dict[int, str] = {
+    # Oscillator workflow
+    3: "oscillator_hold",
+    4: "oscillator_ramp",
+    # Tether-detection workflow
+    23: "post_break",
+    24: "approach",
+    25: "touch",
+    26: "pull_to_reference",
+    27: "measure_reference",
+    29: "tether_force_extension",
+    30: "stop_tether_detection",
+    # Background / instrument housekeeping states present in real files
+    5: "background_5",
+    7: "background_7",
+    19: "background_19",
+    20: "background_20",
+    # Legacy / less common states
     21: "tether_attempt_or_contact",
-    24: "reference_pull",
-    27: "force_extension",
-    # MATLAB DualTrap workflows treat state 31 as a second FE-like subtether run.
     31: "force_extension_subtether",
 }
+
+# Keep the old alias used by callers that import STATE_CODE_HINTS
+STATE_CODE_HINTS: dict[int, str] = STATE_LABELS
 
 
 @dataclass(frozen=True)
