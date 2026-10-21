@@ -874,7 +874,20 @@ def label_cycles(
             # fe_attempt uses the same values as cycle for TetherDetectionMode,
             # so apply the same shift that was already computed for cycle.
             if "fe_attempt" in labelled.columns:
-                df.loc[seg_indices, "fe_attempt"] = shifted_cycle.to_numpy()
+                raw_fe = labelled["fe_attempt"].to_numpy(dtype=object)
+                if "fe_attempt" in df.columns:
+                    existing = df["fe_attempt"].dropna()
+                    fe_offset = int(existing.max()) if len(existing) > 0 else 0
+                else:
+                    fe_offset = 0
+                shifted_fe = pd.array(
+                    [
+                        int(v) + fe_offset if v is not pd.NA and v is not None else pd.NA
+                        for v in raw_fe
+                    ],
+                    dtype=pd.Int64Dtype(),
+                )
+                df.loc[seg_indices, "fe_attempt"] = shifted_fe.to_numpy()
             if "outcome" in labelled.columns:
                 df.loc[seg_indices, "outcome"] = labelled["outcome"].values
 
@@ -1015,13 +1028,14 @@ def compute_force_reference(
                 attempt_num = int(fe_val)
                 if attempt_num in ref_nm_by_attempt:
                     continue
-                # Find the nearest preceding reference
-                best_ref = None
-                for ref_end_idx, ref_mean in ref_pos:
-                    if ref_end_idx < run.start_idx:
-                        best_ref = ref_mean
-                    else:
-                        break
+                # Find the nearest preceding reference (robust: take max ref_end_idx < start)
+                preceding = [
+                    (idx, mean) for idx, mean in ref_pos if idx < run.start_idx
+                ]
+                if preceding:
+                    best_ref = max(preceding, key=lambda x: x[0])[1]
+                else:
+                    best_ref = None
                 if best_ref is not None:
                     ref_nm_by_attempt[attempt_num] = best_ref
 

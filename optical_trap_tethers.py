@@ -246,7 +246,7 @@ class TetherRegistry:
             reader = csv.DictReader(f)
             self._rows = [dict(row) for row in reader]
 
-    def _save_row(self) -> None:
+    def _save_rows(self) -> None:
         """Write current rows to the registry CSV."""
         with self._path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=_REGISTRY_COLUMNS, extrasaction="ignore")
@@ -432,7 +432,7 @@ class TetherRegistry:
     def save(self) -> None:
         """Write the registry to disk."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._save_row()
+        self._save_rows()
 
     def as_dataframe(self) -> pd.DataFrame:
         """Return the registry as a DataFrame."""
