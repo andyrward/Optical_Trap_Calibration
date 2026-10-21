@@ -1136,6 +1136,10 @@ def compute_force_reference(
 
         # Determine which hold is the "high" one per cycle: the hold with
         # the higher mean voltage.
+        hold_phase_mask = np.array(
+            [p == "hold" if (p is not pd.NA and p is not None) else False for p in phase_col],
+            dtype=bool,
+        )
         unique_cycles = sorted(
             set(int(c) for c in cycles if c is not pd.NA and c is not None)
         )
@@ -1144,11 +1148,7 @@ def compute_force_reference(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
             )
-            hold_mask = cmask & np.array(
-                [p == "hold" if (p is not pd.NA and p is not None) else False
-                 for p in phase_col],
-                dtype=bool,
-            ) & valid_mask
+            hold_mask = cmask & hold_phase_mask & valid_mask
             if not hold_mask.any():
                 continue
             hold_v = df["voltage_v"].to_numpy(dtype=float)
@@ -1221,6 +1221,10 @@ def label_tether_detection_outcomes(
     if not bn_mask.any():
         return df
 
+    outcome_bn_mask = np.array(
+        [o == "broke_or_no_tether" if (o is not pd.NA and o is not None) else False for o in outcome],
+        dtype=bool,
+    )
     for attempt_val in set(fe_attempts[bn_mask]):
         if attempt_val is pd.NA or attempt_val is None:
             continue
@@ -1229,12 +1233,7 @@ def label_tether_detection_outcomes(
              if a is not pd.NA and a is not None and a == attempt_val],
             dtype=np.intp,
         )
-        pull_rows = attempt_rows[np.array(
-            [outcome[r] == "broke_or_no_tether"
-             if (outcome[r] is not pd.NA and outcome[r] is not None) else False
-             for r in attempt_rows],
-            dtype=bool,
-        )]
+        pull_rows = attempt_rows[outcome_bn_mask[attempt_rows]]
         if len(pull_rows) == 0:
             continue
         pull_force = force[pull_rows]
@@ -1373,7 +1372,11 @@ def detect_rupture_events(
         ):
             continue
 
-        pull_mask = attempt_mask & (phase_col == "pull_out") & valid_col
+        phase_mask = np.array(
+            [p == "pull_out" if p is not pd.NA and p is not None else False for p in phase_col],
+            dtype=bool,
+        )
+        pull_mask = attempt_mask & phase_mask & valid_col
         idx = np.where(pull_mask)[0]
         if len(idx) < 2:
             continue
@@ -1432,9 +1435,9 @@ def extract_attempt_summary(
     ``rupture_time_s``, ``rupture_force_pn``, ``rupture_extension_nm``,
     ``source``, ``tether_id``.
     """
-    td_mask = df["mode"] == "tether_detection"
+    td_mask = df["mode"].eq("tether_detection")
     td_df = df[td_mask]
-    pull_df = td_df[td_df["phase"] == "pull_out"]
+    pull_df = td_df[td_df["phase"].fillna(False).eq("pull_out")]
     if len(pull_df) == 0:
         return pd.DataFrame()
 
@@ -1712,6 +1715,11 @@ def main(argv: list[str] | None = None) -> int:
     if not fpaths:
         print("Error: no input files found.", file=sys.stderr)
         return 1
+    if args.link_previous and not args.registry:
+        print(
+            "Warning: --link-previous was requested but no --registry path was supplied; skipping registry lookup.",
+            file=sys.stderr,
+        )
 
     # ------------------------------------------------------------------ #
     # Resolve tether metadata (Task C.5)                                   #
@@ -1826,7 +1834,7 @@ def main(argv: list[str] | None = None) -> int:
             if mode_name == "tether_detection" and target_dir is not None:
                 stem = Path(fpath).stem
                 # Attempts CSV
-                if "phase" in df.columns and (df["phase"] == "pull_out").any():
+                if "phase" in df.columns and df["phase"].fillna(False).eq("pull_out").any():
                     att_df = extract_attempt_summary(df)
                     att_path = target_dir / f"{stem}_attempts.csv"
                     att_df.to_csv(att_path, index=False)

@@ -534,8 +534,6 @@ def summarize_edge_correction(df: pd.DataFrame) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     n = len(df)
-    total_corrected = 0
-
     for trap_label, col in [("trap1", "edge_flag_trap1"), ("trap2", "edge_flag_trap2")]:
         if col not in df.columns:
             continue
@@ -544,9 +542,8 @@ def summarize_edge_correction(df: pd.DataFrame) -> dict[str, Any]:
             count = int((flags == flag_val).sum())
             key = f"{trap_label}_{flag_val}"
             result[key] = count
-            if flag_val != _FLAG_NONE:
-                total_corrected += count
 
+    total_corrected = int((df["edge_flag"].to_numpy(dtype=object) != _FLAG_NONE).sum()) if "edge_flag" in df.columns else 0
     result["total_corrected"] = total_corrected
     result["n_frames"] = n
     result["fraction_corrected"] = total_corrected / n if n else 0.0
