@@ -381,20 +381,21 @@ class TestStateBBasedOscillatorPhases(unittest.TestCase):
         self.assertListEqual(list(pull_in_states), [4.0])
 
     def test_unknown_state_inside_oscillator_treated_as_hold(self):
-        # State 7 in the middle of an oscillator segment
-        # OscillatorMode.detect filters it as a single-sample glitch, so
-        # it doesn't break the segment, but label_cycles_segment warns + treats as hold.
-        states = [4] * 50 + [3] * 20 + [4] * 50 + [3] * 100
+        # State 7 in the middle of an oscillator segment should trigger the
+        # warning branch because it survives segment detection as an unknown.
+        states = [4] * 50 + [7] + [3] * 20 + [4] * 50 + [3] * 100
         voltages = (
             np.linspace(8.8, 5.6, 50).tolist()
+            + [5.6]
             + [5.6] * 20
             + np.linspace(5.6, 8.8, 50).tolist()
             + [8.8] * 100
         )
         df = self._run(states, voltages)
         osc = df[df["mode"] == "oscillator"]
-        # There should be oscillator data
         self.assertFalse(osc.empty)
+        self.assertIn("hold", osc["phase"].unique())
+        self.assertIn(7.0, np.unique(osc["state_code"]))
 
 
 # ---------------------------------------------------------------------------

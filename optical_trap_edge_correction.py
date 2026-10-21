@@ -422,9 +422,14 @@ def correct_edge_tracking(
     Frames that were not flagged are bit-identical to the input.
     """
     EDGE_COLS = ("edge1_raw_nm", "edge2_raw_nm", "edge3_raw_nm", "edge4_raw_nm")
-    if not all(c in df.columns for c in EDGE_COLS):
-        # 6-column file or missing edge columns – pass through unchanged
-        logger.debug("correct_edge_tracking: edge columns absent; skipping.")
+    missing = any(c not in df.columns for c in EDGE_COLS)
+    all_na = False
+    if not missing:
+        edge_values = df.loc[:, EDGE_COLS].to_numpy(dtype=float)
+        all_na = np.all(np.isnan(edge_values))
+    if missing or all_na:
+        # 6-column file, missing edge columns, or all-NaN edge data – pass through unchanged
+        logger.debug("correct_edge_tracking: edge columns absent/NaN; skipping.")
         return df
 
     df = df.copy()

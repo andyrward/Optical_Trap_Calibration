@@ -1378,17 +1378,22 @@ def detect_rupture_events(
         if len(idx) < 2:
             continue
 
-        # Search for the last valid sample before a drop of > threshold_pn
-        # within n_samples frames
+        # Search forward for the first window where the force drops by more
+        # than threshold_pn within n_samples frames, then record the preceding
+        # peak sample instead of the post-break tail.
         pull_force = force[idx]
         rupture_i = None
-        for j in range(len(idx) - 1, 0, -1):
-            lo = max(0, j - n_samples)
-            window = pull_force[lo:j + 1]
-            fin = window[np.isfinite(window)]
-            if len(fin) >= 2 and (np.nanmax(fin) - fin[-1]) >= threshold_pn:
-                # Drop detected; the last valid sample above this drop is j
-                rupture_i = idx[j]
+        for j in range(len(idx) - 1):
+            window_end = min(len(idx), j + n_samples + 1)
+            window = pull_force[j:window_end]
+            finite_mask = np.isfinite(window)
+            if finite_mask.sum() < 2:
+                continue
+            peak_val = np.nanmax(window[finite_mask])
+            final_val = window[finite_mask][-1]
+            if (peak_val - final_val) >= threshold_pn:
+                peak_positions = np.flatnonzero(finite_mask & (window == peak_val))
+                rupture_i = idx[j + int(peak_positions[0])]
                 break
 
         if rupture_i is not None:
@@ -1796,7 +1801,13 @@ def main(argv: list[str] | None = None) -> int:
             # ---------------------------------------------------------- #
             # Tether / provenance metadata on rows (Task C.5)            #
             # ---------------------------------------------------------- #
-            file_tether_id = tether_id  # may be None if not supplied
+            file_tether_id = tether_id
+            if file_tether_id is None and args.link_previous and bead_val is not None:
+                from optical_trap_tethers import TetherRegistry
+                if args.registry:
+                    reg = TetherRegistry(args.registry)
+                    folder_path = str(Path(fpath).parent)
+                    file_tether_id = reg.link_previous(folder_path, bead_val)
             if file_tether_id is not None:
                 df["tether_id"] = file_tether_id
             if bead_val is not None:
