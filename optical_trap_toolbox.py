@@ -215,7 +215,7 @@ def load_normalized_trace(
         trace["position_2_nm"] = (data[:, 2] + data[:, 4]) / 2.0
         trace["state_code"] = data[:, 5]
         trace["actuation_state_code"] = data[:, 6]
-        trace["extension_nm"] = trace["position_1_nm"] - trace["position_2_nm"]
+        trace["extension_nm"] = trace["position_2_nm"] - trace["position_1_nm"]
     elif n_cols >= 2:
         positions = data[:, 1:]
         if positions.shape[1] == 1:
@@ -223,7 +223,7 @@ def load_normalized_trace(
         elif positions.shape[1] == 2:
             trace["position_1_nm"] = positions[:, 0]
             trace["position_2_nm"] = positions[:, 1]
-            trace["extension_nm"] = positions[:, 0] - positions[:, 1]
+            trace["extension_nm"] = positions[:, 1] - positions[:, 0]
         elif positions.shape[1] == 4:
             # Repo convention for dual-trap data keeps the two trap centers interleaved:
             # trap1 = mean(col0, col2), trap2 = mean(col1, col3).
@@ -231,13 +231,13 @@ def load_normalized_trace(
             trap2 = (positions[:, 1] + positions[:, 3]) / 2.0
             trace["position_1_nm"] = trap1
             trace["position_2_nm"] = trap2
-            trace["extension_nm"] = trap1 - trap2
+            trace["extension_nm"] = trap2 - trap1
         elif positions.shape[1] == 3:
             # A 3-value position block includes one explicit position pair plus a third axis/track,
             # so the first two columns remain the most stable dual-position representation.
             trace["position_1_nm"] = positions[:, 0]
             trace["position_2_nm"] = positions[:, 1]
-            trace["extension_nm"] = positions[:, 0] - positions[:, 1]
+            trace["extension_nm"] = positions[:, 1] - positions[:, 0]
         else:
             trace["position_1_nm"] = positions.mean(axis=1)
     else:

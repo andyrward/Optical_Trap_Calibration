@@ -303,6 +303,15 @@ class TestOscillatorPartialCycles(unittest.TestCase):
         self.assertIn("partial_end_of_file", set(partial["cycle_status"].dropna().tolist()))
         self.assertEqual(int(((df["state_code"].isin([3, 4])) & (df["cycle"].isna())).sum()), 0)
 
+    def test_no_state3_or_state4_left_without_cycle_for_unfinished_ramp(self):
+        # A stalled end-of-file ramp should remain in the oscillator cycle,
+        # not be left without a cycle number.
+        states = [4] * 50 + [3] * 20 + [4] * 50
+        voltages = [8.8] * 50 + [5.6] * 20 + [8.8] * 50
+        df = self._run(states, voltages, smooth_window=15)
+        unassigned = (df["state_code"].isin([3, 4])) & (df["cycle"].isna())
+        self.assertEqual(int(unassigned.sum()), 0)
+
 
 class TestValidMask(unittest.TestCase):
     """Tests for apply_valid_mask."""

@@ -486,15 +486,22 @@ class OscillatorMode(ModeSpec):
 
         # Second pass: for each contiguous state-4 run, determine direction
         # from the overall voltage change (first → last sample of the run).
+        # A state-4 run that never moves (or moves less than the threshold) is
+        # treated as a stalled ramp rather than a valid pull_in, and is kept in
+        # the cycle to preserve end-of-file partial information.
         diff = np.diff((state == OSCILLATOR_RAMP_STATE).astype(np.int8), prepend=0, append=0)
         ramp_starts = np.where(diff == 1)[0]
         ramp_ends = np.where(diff == -1)[0]
         for rs, re in zip(ramp_starts, ramp_ends):
             v_run = voltage[rs:re]
             if len(v_run) >= 2:
-                direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
+                delta_v = float(v_run[-1] - v_run[0])
+                if abs(delta_v) <= max(abs(float(dv_dt_threshold)), 1e-12):
+                    direction = "ramp_stalled"
+                else:
+                    direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
             else:
-                direction = "pull_out"  # single-sample run: default
+                direction = "ramp_stalled"  # single-sample run: stalled/default
             phase_arr[rs:re] = direction
 
         # Warn about any unknown states
@@ -787,11 +794,13 @@ def _assign_oscillator_cycles(phase: np.ndarray) -> np.ndarray:
     """
     n = len(phase)
     cycle = np.full(n, pd.NA, dtype=object)
-    # Find transitions into pull_out from hold (or start)
+    # Find transitions into the first visible part of a cycle. In partial EOF
+    # records, a stalled ramp following a hold can be the start of the last
+    # partial cycle even before a full pull_out is observed.
     is_pull_out = phase == "pull_out"
-    # shifted: previous phase
+    is_ramp_stalled = phase == "ramp_stalled"
     prev_is_hold_or_start = np.concatenate([[True], (phase[:-1] == "hold")])
-    new_cycle_starts = is_pull_out & prev_is_hold_or_start
+    new_cycle_starts = (is_pull_out | is_ramp_stalled) & prev_is_hold_or_start
 
     if not new_cycle_starts.any():
         return cycle
@@ -855,6 +864,9 @@ def _annotate_oscillator_cycles(df_seg: pd.DataFrame) -> pd.DataFrame:
         has_pull_in = "pull_in" in set(seq)
         last_phase = str(seq[-1]) if seq else ""
 
+        # A stalled ramp is not a valid pull_in, but it can still be part of an
+        # end-of-file partial cycle. Treat such cycles as incomplete to keep the
+        # frame assigned to the partial cycle rather than leaving it orphaned.
         is_complete = has_pull_out and has_pull_in and hold_runs >= 2 and last_phase == "hold"
 
         cycle_complete[idx] = bool(is_complete)
@@ -880,6 +892,8 @@ def _annotate_oscillator_cycles(df_seg: pd.DataFrame) -> pd.DataFrame:
         cycle_reason[idx] = (
             f"missing {', '.join(missing)}" if missing else "incomplete phase pattern"
         )
+        if "ramp_stalled" in set(seq) and not has_pull_in:
+            cycle_reason[idx] = "stalled_ramp_at_eof"
 
     df_seg["cycle_complete"] = pd.array(cycle_complete, dtype=pd.BooleanDtype())
     df_seg["cycle_status"] = cycle_status
@@ -1364,6 +1378,10 @@ def compute_force_reference(
             ref_col[cmask] = ref_val
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
+    # Use a stable reference fallback for partial oscillator cycles: prefer the
+    # cycle's own final high hold, then its relaxed end at the top voltage, then
+    # the most recent complete oscillator cycle.  Low/stretched holds are never
+    # used as the reference.
     force = (trap1 - ref_col) * stiff
     finite_force = np.isfinite(force)
     df["force_pn"] = np.where(finite_force, force, np.nan)
