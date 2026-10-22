@@ -56,7 +56,7 @@ def _make_osc_df(
 
     trap1 = (e1 + e3) / 2.0
     trap2 = (e2 + e4) / 2.0
-    ext = trap1 - trap2
+    ext = trap2 - trap1
 
     return pd.DataFrame({
         "source": "synthetic",

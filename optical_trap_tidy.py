@@ -873,9 +873,12 @@ def _annotate_oscillator_cycles(df_seg: pd.DataFrame) -> pd.DataFrame:
         cycle_last_phase[idx] = last_phase if last_phase else pd.NA
 
         end_i = int(idx[-1])
+        next_state = pd.NA
         if end_i + 1 < n:
             next_state = state[end_i + 1]
             cycle_next_state[idx] = int(next_state) if np.isfinite(next_state) else pd.NA
+        else:
+            cycle_next_state[idx] = pd.NA
 
         if is_complete:
             cycle_status[idx] = "complete"
@@ -888,12 +891,17 @@ def _annotate_oscillator_cycles(df_seg: pd.DataFrame) -> pd.DataFrame:
             missing.append("pull_in")
         if hold_runs < 2 or last_phase != "hold":
             missing.append("final_hold")
-        cycle_status[idx] = "partial_truncated"
-        cycle_reason[idx] = (
-            f"missing {', '.join(missing)}" if missing else "incomplete phase pattern"
-        )
-        if "ramp_stalled" in set(seq) and not has_pull_in:
-            cycle_reason[idx] = "stalled_ramp_at_eof"
+
+        if next_state is pd.NA or next_state is None:
+            cycle_status[idx] = "partial_end_of_file"
+            cycle_reason[idx] = "stalled_ramp_at_eof" if "ramp_stalled" in set(seq) and not has_pull_in else "missing final_hold"
+        else:
+            cycle_status[idx] = "partial_truncated"
+            cycle_reason[idx] = (
+                f"missing {', '.join(missing)}" if missing else "incomplete phase pattern"
+            )
+            if "ramp_stalled" in set(seq) and not has_pull_in:
+                cycle_reason[idx] = "stalled_ramp_at_eof"
 
     df_seg["cycle_complete"] = pd.array(cycle_complete, dtype=pd.BooleanDtype())
     df_seg["cycle_status"] = cycle_status
@@ -937,7 +945,8 @@ def _finalize_oscillator_cycle_metadata(df: pd.DataFrame) -> pd.DataFrame:
     osc_complete = df.loc[osc_idx, "cycle_complete"].astype("boolean").to_numpy()
 
     # Keep complete-cycle numbering unchanged by remapping complete cycles first,
-    # then appending partial cycles after them.
+    # then appending partial cycles after them, while preserving chronological
+    # order across the full time range.
     cycle_first_idx: dict[int, int] = {}
     cycle_is_complete: dict[int, bool] = {}
     for i, cid in zip(osc_idx, osc_cycles):
@@ -2127,13 +2136,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     # print per-run summary
-    print(f"{'Source':<30} {'FE_attempts':>11} {'Survived':>8} {'Broke':>6} {'Osc_cycles':>10}")
-    print("-" * 69)
+    print(
+        f"{'Source':<30} {'FE_attempts':>11} {'Survived':>8} {'Broke':>6} "
+        f"{'Complete':>10} {'Partial':>8}"
+    )
+    print("-" * 89)
     for s in summaries:
         print(
             f"{s['source']:<30} {s['n_tether_attempts']:>11} "
             f"{s['n_survived']:>8} {s['n_broke']:>6} "
-            f"{s['n_oscillator_cycles']:>10}"
+            f"{s['n_complete_oscillator_cycles']:>10} {s['n_partial_oscillator_cycles']:>8}"
         )
 
     # ------------------------------------------------------------------ #

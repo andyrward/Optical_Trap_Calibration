@@ -474,7 +474,7 @@ def correct_edge_tracking(
     # --- Update positions ---
     trap1_new = (e1_corr + e3_corr) / 2.0
     trap2_new = (e2_corr + e4_corr) / 2.0
-    ext_new = trap1_new - trap2_new
+    ext_new = trap2_new - trap1_new
 
     df["trap1_pos_nm"] = trap1_new
     df["trap2_pos_nm"] = trap2_new
