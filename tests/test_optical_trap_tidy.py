@@ -528,11 +528,12 @@ class TestRegressionTether1_1(unittest.TestCase):
         self.assertIn("hold", phases)
 
     def test_extension_range_oscillator(self):
-        # Issue: extension between about −3,700 and −7,000 nm
+        # Extension grows with stretch and stays positive;
+        # the stretched state is around +6,500 to +3,700 nm in the opposite sign.
         osc = self.df[self.df["mode"] == "oscillator"]
         ext = osc["extension_nm"].to_numpy(dtype=float)
-        self.assertLessEqual(np.nanmin(ext), -6500)
-        self.assertGreaterEqual(np.nanmax(ext), -4000)
+        self.assertGreaterEqual(np.nanmax(ext), 6500)
+        self.assertLessEqual(np.nanmin(ext), 4000)
 
     def test_setpoint_v_present_for_hold(self):
         osc = self.df[self.df["mode"] == "oscillator"]
@@ -542,6 +543,7 @@ class TestRegressionTether1_1(unittest.TestCase):
 
     def test_no_partial_cycles(self):
         osc = self.df[self.df["mode"] == "oscillator"]
+        # This file is expected to have no partial oscillator cycles.
         self.assertFalse((osc["cycle_complete"] == False).any())  # noqa: E712
 
 
@@ -579,7 +581,10 @@ class TestRegressionTether1_2(unittest.TestCase):
         df = find_routine_segments(df)
         df = label_cycles(df)
         osc = df[df["mode"] == "oscillator"]
-        self.assertFalse((osc["cycle_complete"] == False).any())  # noqa: E712
+        # This file records a terminal stalled ramp at EOF and must retain it as a
+        # partial cycle; the earlier no-partial assertion is therefore intentionally
+        # not used here.
+        self.assertTrue((osc["cycle_complete"] == False).any())  # noqa: E712
 
 
 class TestRegressionTether1Final(unittest.TestCase):

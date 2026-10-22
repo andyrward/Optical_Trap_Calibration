@@ -1280,12 +1280,14 @@ def compute_force_reference(
 
     ref_col = np.full(n, np.nan)
     ref_method_col = np.full(n, method, dtype=object)
+    ref_source_col = np.full(n, pd.NA, dtype=object)
 
     if method == "fixed":
         if force_ref_nm is None:
             warnings.warn("method='fixed' requires force_ref_nm; leaving force_pn as NaN.", stacklevel=2)
         else:
             ref_col[:] = force_ref_nm
+            ref_source_col[:] = "fixed"
 
     elif method == "measure_ref":
         # For each fe_attempt, find the nearest preceding state-27 segment
@@ -1333,17 +1335,13 @@ def compute_force_reference(
                 a = int(fe)
                 if a in ref_nm_by_attempt:
                     ref_col[i] = ref_nm_by_attempt[a]
+                    ref_source_col[i] = "measure_ref"
 
     elif method == "high_hold_tail":
-        # For each oscillator cycle, use the mean of the last force_ref_frames
-        # valid samples of the high-voltage hold (the "hold" phase at the top
-        # of the voltage ramp).
         cycles = df["cycle"].to_numpy(dtype=object)
         phase_col = df["phase"].to_numpy(dtype=object)
         valid_mask = df["valid"].to_numpy(dtype=bool)
-
-        # Determine which hold is the "high" one per cycle: the hold with
-        # the higher mean voltage.
+        voltage = df["voltage_v"].to_numpy(dtype=float)
         hold_phase_mask = np.array(
             [p == "hold" if (p is not pd.NA and p is not None) else False for p in phase_col],
             dtype=bool,
@@ -1351,42 +1349,63 @@ def compute_force_reference(
         unique_cycles = sorted(
             set(int(c) for c in cycles if c is not pd.NA and c is not None)
         )
+        last_complete_ref = np.nan
         for cid in unique_cycles:
             cmask = np.array(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
             )
-            hold_mask = cmask & hold_phase_mask & valid_mask
-            if not hold_mask.any():
-                continue
-            hold_v = df["voltage_v"].to_numpy(dtype=float)
-            # Split hold samples into contiguous runs (may be two holds per cycle)
-            h_idx = np.where(hold_mask)[0]
-            if len(h_idx) == 0:
-                continue
-            hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
-            hold_groups = np.split(h_idx, hold_breaks)
-            # High-voltage hold = group with higher mean voltage
-            hold_groups_sorted = sorted(
-                hold_groups,
-                key=lambda g: float(np.nanmean(hold_v[g])),
-                reverse=True,
+            cycle_complete = (
+                bool(df.loc[cmask, "cycle_complete"].dropna().astype(bool).all())
+                if "cycle_complete" in df.columns and df.loc[cmask, "cycle_complete"].notna().any()
+                else False
             )
-            high_hold_idx = hold_groups_sorted[0]
-            tail_idx = high_hold_idx[-force_ref_frames:]
-            ref_val = float(np.nanmean(trap1[tail_idx]))
-            ref_col[cmask] = ref_val
+            hold_mask = cmask & hold_phase_mask & valid_mask
+            ref_val = np.nan
+            source = pd.NA
+
+            if hold_mask.any():
+                h_idx = np.where(hold_mask)[0]
+                hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+                hold_groups = np.split(h_idx, hold_breaks)
+                hold_groups_sorted = sorted(
+                    hold_groups,
+                    key=lambda g: float(np.nanmean(voltage[g])),
+                    reverse=True,
+                )
+                high_hold_idx = hold_groups_sorted[0]
+                high_voltage = float(np.nanmean(voltage[high_hold_idx]))
+                if np.isfinite(high_voltage) and high_voltage >= 8.5:
+                    tail_idx = high_hold_idx[-force_ref_frames:]
+                    ref_val = float(np.nanmean(trap1[tail_idx]))
+                    source = "own_high_hold"
+
+            if (not np.isfinite(ref_val) or source is pd.NA) and np.any(cmask):
+                cycle_tail = np.where(cmask)[0][-force_ref_frames:]
+                if len(cycle_tail):
+                    top_hold = (phase_col[cycle_tail] == "hold") & (voltage[cycle_tail] >= 8.5)
+                    if np.any(top_hold):
+                        tail_idx = cycle_tail[top_hold]
+                        ref_val = float(np.nanmean(trap1[tail_idx[-force_ref_frames:]]))
+                        source = "own_relaxed_end"
+
+            if (not np.isfinite(ref_val) or source is pd.NA) and np.isfinite(last_complete_ref):
+                ref_val = float(last_complete_ref)
+                source = "previous_cycle"
+
+            if np.isfinite(ref_val):
+                ref_col[cmask] = ref_val
+                ref_source_col[cmask] = source
+            if cycle_complete and np.isfinite(ref_val):
+                last_complete_ref = ref_val
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
-    # Use a stable reference fallback for partial oscillator cycles: prefer the
-    # cycle's own final high hold, then its relaxed end at the top voltage, then
-    # the most recent complete oscillator cycle.  Low/stretched holds are never
-    # used as the reference.
     force = (trap1 - ref_col) * stiff
     finite_force = np.isfinite(force)
     df["force_pn"] = np.where(finite_force, force, np.nan)
     df["force_ref_nm"] = ref_col
     df["force_ref_method"] = ref_method_col
+    df["force_ref_source"] = ref_source_col
 
     return df
 
@@ -1756,6 +1775,8 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
                 n_no_tether = int((outcomes == "no_tether").sum())
 
     n_osc_cycles = 0
+    n_complete_osc_cycles = 0
+    n_partial_osc_cycles = 0
     if (df["mode"] == "oscillator").any():
         osc = df[df["mode"] == "oscillator"]
         if "cycle_complete" in osc.columns and osc["cycle_complete"].notna().any():
@@ -1765,16 +1786,22 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
                 .astype(int)
                 .unique()
             )
-            n_osc_cycles = len(complete_cycle_ids)
-        else:
-            n_osc_cycles = (
-                osc["cycle"]
+            partial_cycle_ids = (
+                osc[osc["cycle_complete"].astype("boolean") == False]["cycle"]  # noqa: E712
                 .dropna()
                 .astype(int)
-                .max()
-                if osc["cycle"].notna().any()
-                else 0
+                .unique()
             )
+            n_complete_osc_cycles = len(complete_cycle_ids)
+            n_partial_osc_cycles = len(partial_cycle_ids)
+            # Back-compat: legacy reporting kept the count of complete cycles
+            # only, while the new split counts are available separately.
+            n_osc_cycles = n_complete_osc_cycles
+        else:
+            cycle_ids = osc["cycle"].dropna().astype(int).unique()
+            n_osc_cycles = len(cycle_ids)
+            n_complete_osc_cycles = n_osc_cycles
+            n_partial_osc_cycles = 0
 
     # Count and warn about unknown state codes
     n_unknown_states = 0
@@ -1804,6 +1831,8 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         "n_survived": n_survived,
         "n_broke": n_broke,
         "n_no_tether": n_no_tether,
+        "n_complete_oscillator_cycles": int(n_complete_osc_cycles) if pd.notna(n_complete_osc_cycles) and n_complete_osc_cycles else 0,
+        "n_partial_oscillator_cycles": int(n_partial_osc_cycles) if pd.notna(n_partial_osc_cycles) and n_partial_osc_cycles else 0,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
         "n_unknown_state_frames": n_unknown_states,
     }

@@ -351,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
 
             csv_path = out_dir / f"{source}_oscillator.csv"
             stats.to_csv(csv_path, index=False)
-            print(f"{source}: {len(stats)} cycle(s). CSV → {csv_path}")
+            complete_count = int((stats["cycle_complete"].astype(bool)).sum()) if "cycle_complete" in stats.columns else len(stats)
+            partial_count = int((~stats["cycle_complete"].astype(bool)).sum()) if "cycle_complete" in stats.columns else 0
+            print(f"{source}: {complete_count} complete cycle(s), {partial_count} partial cycle(s). CSV → {csv_path}")
 
             fig = plot_oscillator(df, stats)
             fig_path = out_dir / f"{source}_oscillator.png"
