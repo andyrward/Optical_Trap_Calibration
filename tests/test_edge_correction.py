@@ -56,7 +56,7 @@ def _make_osc_df(
 
     trap1 = (e1 + e3) / 2.0
     trap2 = (e2 + e4) / 2.0
-    ext = trap1 - trap2
+    ext = trap2 - trap1
 
     return pd.DataFrame({
         "source": "synthetic",
@@ -132,6 +132,16 @@ class TestEdgeCorrectionSentinel(unittest.TestCase):
             result["trap1_pos_nm"].to_numpy(),
             df["trap1_pos_nm"].to_numpy(),
         )
+
+    def test_positive_extension_with_edge_correction(self):
+        from optical_trap_edge_correction import correct_edge_tracking
+
+        df = _make_osc_df(n_frames=200)
+        result = correct_edge_tracking(df)
+
+        self.assertTrue(np.all(np.isfinite(result["extension_nm"])))
+        self.assertGreater(np.nanmax(result["extension_nm"]), 0.0)
+        self.assertGreater(np.nanmedian(result["extension_nm"]), 0.0)
 
 
 class TestEdgeCorrectionOffset(unittest.TestCase):

@@ -275,6 +275,11 @@ def load_tidy(
             "cycle": pd.NA,
             "phase": pd.NA,
             "setpoint_v": pd.NA,
+            "cycle_complete": pd.NA,
+            "cycle_status": pd.NA,
+            "cycle_partial_reason": pd.NA,
+            "cycle_last_phase": pd.NA,
+            "cycle_next_state": pd.NA,
             "valid": True,
             # tether-detection columns (filled by label_cycles / compute_force_reference)
             "fe_attempt": pd.NA,
@@ -289,6 +294,8 @@ def load_tidy(
         }
     )
     df["cycle"] = df["cycle"].astype(pd.Int64Dtype())
+    df["cycle_complete"] = df["cycle_complete"].astype(pd.BooleanDtype())
+    df["cycle_next_state"] = df["cycle_next_state"].astype(pd.Int64Dtype())
     df["fe_attempt"] = df["fe_attempt"].astype(pd.Int64Dtype())
 
     # Optional edge-tracking correction
@@ -434,12 +441,12 @@ class OscillatorMode(ModeSpec):
                     i += 4
                 else:
                     i += 1
-            if not quad_start_positions:
-                continue
-            # Within a block all quads are drawn from consecutive 3/4 runs;
-            # merge them all into one segment.
-            seg_start = block[quad_start_positions[0]].start_idx
-            seg_end = block[quad_start_positions[-1] + 3].end_idx
+            # Keep the whole contiguous 3/4 run block so partial cycles at the
+            # beginning/end are retained and can be flagged downstream.
+            # If no full quad is present, still keep the block as a
+            # partial-only oscillator segment.
+            seg_start = block[0].start_idx
+            seg_end = block[-1].end_idx
             segments.append((seg_start, seg_end))
 
         return segments
@@ -479,15 +486,22 @@ class OscillatorMode(ModeSpec):
 
         # Second pass: for each contiguous state-4 run, determine direction
         # from the overall voltage change (first → last sample of the run).
+        # A state-4 run that never moves (or moves less than the threshold) is
+        # treated as a stalled ramp rather than a valid pull_in, and is kept in
+        # the cycle to preserve end-of-file partial information.
         diff = np.diff((state == OSCILLATOR_RAMP_STATE).astype(np.int8), prepend=0, append=0)
         ramp_starts = np.where(diff == 1)[0]
         ramp_ends = np.where(diff == -1)[0]
         for rs, re in zip(ramp_starts, ramp_ends):
             v_run = voltage[rs:re]
             if len(v_run) >= 2:
-                direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
+                delta_v = float(v_run[-1] - v_run[0])
+                if abs(delta_v) <= max(abs(float(dv_dt_threshold)), 1e-12):
+                    direction = "ramp_stalled"
+                else:
+                    direction = "pull_out" if v_run[-1] < v_run[0] else "pull_in"
             else:
-                direction = "pull_out"  # single-sample run: default
+                direction = "ramp_stalled"  # single-sample run: stalled/default
             phase_arr[rs:re] = direction
 
         # Warn about any unknown states
@@ -515,7 +529,7 @@ class OscillatorMode(ModeSpec):
         df_seg["phase"] = phase_arr
         df_seg["cycle"] = pd.array(cycle_arr, dtype=pd.Int64Dtype())
         df_seg["setpoint_v"] = _setpoint_voltages(df_seg["voltage_v"].to_numpy(), phase_arr)
-        return df_seg
+        return _annotate_oscillator_cycles(df_seg)
 
 
 MODE_REGISTRY.register(OscillatorMode())
@@ -780,11 +794,13 @@ def _assign_oscillator_cycles(phase: np.ndarray) -> np.ndarray:
     """
     n = len(phase)
     cycle = np.full(n, pd.NA, dtype=object)
-    # Find transitions into pull_out from hold (or start)
+    # Find transitions into the first visible part of a cycle. In partial EOF
+    # records, a stalled ramp following a hold can be the start of the last
+    # partial cycle even before a full pull_out is observed.
     is_pull_out = phase == "pull_out"
-    # shifted: previous phase
+    is_ramp_stalled = phase == "ramp_stalled"
     prev_is_hold_or_start = np.concatenate([[True], (phase[:-1] == "hold")])
-    new_cycle_starts = is_pull_out & prev_is_hold_or_start
+    new_cycle_starts = (is_pull_out | is_ramp_stalled) & prev_is_hold_or_start
 
     if not new_cycle_starts.any():
         return cycle
@@ -795,6 +811,189 @@ def _assign_oscillator_cycles(phase: np.ndarray) -> np.ndarray:
     started = np.where(new_cycle_starts)[0][0]
     cycle[started:] = cycle_nums[started:]
     return cycle
+
+
+def _compress_phases(phase_values: np.ndarray) -> list[str]:
+    """Return contiguous phase values as a compact sequence."""
+    if len(phase_values) == 0:
+        return []
+    seq: list[str] = [str(phase_values[0])]
+    for value in phase_values[1:]:
+        sval = str(value)
+        if sval != seq[-1]:
+            seq.append(sval)
+    return seq
+
+
+def _count_hold_runs(phase_values: np.ndarray) -> int:
+    """Count contiguous hold runs in a phase vector."""
+    if len(phase_values) == 0:
+        return 0
+    is_hold = np.array(phase_values == "hold", dtype=bool)
+    edges = np.diff(is_hold.astype(np.int8), prepend=0, append=0)
+    starts = np.count_nonzero(edges == 1)
+    return int(starts)
+
+
+def _annotate_oscillator_cycles(df_seg: pd.DataFrame) -> pd.DataFrame:
+    """Add per-cycle completeness metadata for one oscillator segment."""
+    df_seg = df_seg.copy()
+    n = len(df_seg)
+    cycle = df_seg["cycle"].to_numpy(dtype=object)
+    phase = df_seg["phase"].to_numpy(dtype=object)
+    state = df_seg["state_code"].to_numpy(dtype=float)
+
+    cycle_complete = np.full(n, pd.NA, dtype=object)
+    cycle_status = np.full(n, pd.NA, dtype=object)
+    cycle_reason = np.full(n, pd.NA, dtype=object)
+    cycle_last_phase = np.full(n, pd.NA, dtype=object)
+    cycle_next_state = np.full(n, pd.NA, dtype=object)
+
+    unique_cycles = sorted(
+        set(int(c) for c in cycle if c is not pd.NA and c is not None)
+    )
+    for cid in unique_cycles:
+        idx = np.where(np.array([c is not pd.NA and c is not None and int(c) == cid for c in cycle]))[0]
+        if idx.size == 0:
+            continue
+
+        phase_vals = phase[idx]
+        seq = _compress_phases(phase_vals)
+        hold_runs = _count_hold_runs(phase_vals)
+        has_pull_out = "pull_out" in set(seq)
+        has_pull_in = "pull_in" in set(seq)
+        last_phase = str(seq[-1]) if seq else ""
+
+        # A stalled ramp is not a valid pull_in, but it can still be part of an
+        # end-of-file partial cycle. Treat such cycles as incomplete to keep the
+        # frame assigned to the partial cycle rather than leaving it orphaned.
+        is_complete = has_pull_out and has_pull_in and hold_runs >= 2 and last_phase == "hold"
+
+        cycle_complete[idx] = bool(is_complete)
+        cycle_last_phase[idx] = last_phase if last_phase else pd.NA
+
+        end_i = int(idx[-1])
+        next_state = pd.NA
+        if end_i + 1 < n:
+            next_state = state[end_i + 1]
+            cycle_next_state[idx] = int(next_state) if np.isfinite(next_state) else pd.NA
+        else:
+            cycle_next_state[idx] = pd.NA
+
+        if is_complete:
+            cycle_status[idx] = "complete"
+            continue
+
+        missing: list[str] = []
+        if not has_pull_out:
+            missing.append("pull_out")
+        if not has_pull_in:
+            missing.append("pull_in")
+        if hold_runs < 2 or last_phase != "hold":
+            missing.append("final_hold")
+
+        if next_state is pd.NA or next_state is None:
+            cycle_status[idx] = "partial_end_of_file"
+            cycle_reason[idx] = "stalled_ramp_at_eof" if "ramp_stalled" in set(seq) and not has_pull_in else "missing final_hold"
+        else:
+            cycle_status[idx] = "partial_truncated"
+            cycle_reason[idx] = (
+                f"missing {', '.join(missing)}" if missing else "incomplete phase pattern"
+            )
+            if "ramp_stalled" in set(seq) and not has_pull_in:
+                cycle_reason[idx] = "stalled_ramp_at_eof"
+
+    df_seg["cycle_complete"] = pd.array(cycle_complete, dtype=pd.BooleanDtype())
+    df_seg["cycle_status"] = cycle_status
+    df_seg["cycle_partial_reason"] = cycle_reason
+    df_seg["cycle_last_phase"] = cycle_last_phase
+    df_seg["cycle_next_state"] = pd.array(cycle_next_state, dtype=pd.Int64Dtype())
+    return df_seg
+
+
+def _warn_unassigned_oscillator_frames(df: pd.DataFrame) -> None:
+    """Warn when state 3/4 frames are left without a cycle number."""
+    mask = df["state_code"].isin([3, 4]) & df["cycle"].isna()
+    if not mask.any():
+        return
+
+    idx = df.index[mask].to_numpy()
+    breaks = np.where(np.diff(idx) > 1)[0] + 1
+    ranges = np.split(idx, breaks)
+    spans: list[str] = []
+    for rng in ranges:
+        t0 = float(df.loc[rng[0], "time_s"])
+        t1 = float(df.loc[rng[-1], "time_s"])
+        spans.append(f"{t0:.3f}-{t1:.3f}s")
+    logger.warning(
+        "Oscillator: %d state-3/4 frame(s) were left without any cycle. Time range(s): %s",
+        int(mask.sum()),
+        ", ".join(spans),
+    )
+
+
+def _finalize_oscillator_cycle_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Finalize oscillator cycle numbering and completeness metadata."""
+    df = df.copy()
+    osc_mask = (df["mode"] == "oscillator") & df["cycle"].notna()
+    if not osc_mask.any():
+        _warn_unassigned_oscillator_frames(df)
+        return df
+
+    osc_idx = df.index[osc_mask].to_numpy()
+    osc_cycles = df.loc[osc_idx, "cycle"].astype(int).to_numpy()
+    osc_complete = df.loc[osc_idx, "cycle_complete"].astype("boolean").to_numpy()
+
+    # Renumber oscillator cycles by start time so the cycle search remains in
+    # chronological order even when the raw file IDs are sparse/non-monotonic.
+    cycle_first_idx: dict[int, int] = {}
+    for i, cid in zip(osc_idx, osc_cycles):
+        cycle_first_idx.setdefault(int(cid), int(i))
+    ordered_old_ids = sorted(cycle_first_idx.keys(), key=lambda c: cycle_first_idx[c])
+    remap = {old: new for new, old in enumerate(ordered_old_ids, start=1)}
+    df.loc[osc_mask, "cycle"] = pd.array([remap[int(c)] for c in osc_cycles], dtype=pd.Int64Dtype())
+
+    # Fill next-state and end-of-file partial status after remapping.
+    updated_cycles = sorted(df.loc[osc_mask, "cycle"].dropna().astype(int).unique().tolist())
+    for cid in updated_cycles:
+        cyc_rows = df[(df["mode"] == "oscillator") & (df["cycle"] == cid)]
+        if cyc_rows.empty:
+            continue
+        end_idx = int(cyc_rows.index[-1])
+        next_state = pd.NA
+        if end_idx + 1 < len(df):
+            ns = float(df.loc[end_idx + 1, "state_code"])
+            if np.isfinite(ns):
+                next_state = int(ns)
+        df.loc[cyc_rows.index, "cycle_next_state"] = next_state
+        is_complete = bool(cyc_rows["cycle_complete"].dropna().astype(bool).all()) if cyc_rows["cycle_complete"].notna().any() else False
+        if not is_complete:
+            trailing_states = df.iloc[end_idx + 1 :]["state_code"]
+            if next_state is pd.NA:
+                eof_partial = True
+            elif int(next_state) == 2:
+                eof_partial = False
+            else:
+                eof_partial = not trailing_states.isin([3, 4]).any()
+            status = "partial_end_of_file" if eof_partial else "partial_truncated"
+            df.loc[cyc_rows.index, "cycle_status"] = status
+            t0 = float(cyc_rows["time_s"].iloc[0])
+            t1 = float(cyc_rows["time_s"].iloc[-1])
+            last_phase = cyc_rows["cycle_last_phase"].iloc[-1]
+            reason = cyc_rows["cycle_partial_reason"].iloc[-1]
+            logger.warning(
+                "Oscillator partial cycle %d: %.3f-%.3f s (%s; last_phase=%s; next_state=%s; reason=%s)",
+                int(cid),
+                t0,
+                t1,
+                status,
+                last_phase,
+                "EOF" if eof_partial else str(int(next_state)) if next_state is not pd.NA else "EOF",
+                reason if pd.notna(reason) else "unknown",
+            )
+
+    _warn_unassigned_oscillator_frames(df)
+    return df
 
 
 def _assign_fe_cycles(phase: np.ndarray) -> np.ndarray:
@@ -949,6 +1148,15 @@ def label_cycles(
             df.loc[seg_indices, "cycle"] = shifted_cycle.to_numpy()
             df.loc[seg_indices, "phase"] = labelled["phase"].values
             df.loc[seg_indices, "setpoint_v"] = labelled["setpoint_v"].values
+            for extra_col in (
+                "cycle_complete",
+                "cycle_status",
+                "cycle_partial_reason",
+                "cycle_last_phase",
+                "cycle_next_state",
+            ):
+                if extra_col in labelled.columns:
+                    df.loc[seg_indices, extra_col] = labelled[extra_col].values
             # Propagate tether-detection columns if the mode set them.
             # fe_attempt uses the same values as cycle for TetherDetectionMode,
             # so apply the same shift that was already computed for cycle.
@@ -969,6 +1177,9 @@ def label_cycles(
                 df.loc[seg_indices, "fe_attempt"] = shifted_fe.to_numpy()
             if "outcome" in labelled.columns:
                 df.loc[seg_indices, "outcome"] = labelled["outcome"].values
+
+    if (df["mode"] == "oscillator").any():
+        df = _finalize_oscillator_cycle_metadata(df)
 
     return df
 
@@ -1072,12 +1283,14 @@ def compute_force_reference(
 
     ref_col = np.full(n, np.nan)
     ref_method_col = np.full(n, method, dtype=object)
+    ref_source_col = np.full(n, pd.NA, dtype=object)
 
     if method == "fixed":
         if force_ref_nm is None:
             warnings.warn("method='fixed' requires force_ref_nm; leaving force_pn as NaN.", stacklevel=2)
         else:
             ref_col[:] = force_ref_nm
+            ref_source_col[:] = "fixed"
 
     elif method == "measure_ref":
         # For each fe_attempt, find the nearest preceding state-27 segment
@@ -1125,17 +1338,13 @@ def compute_force_reference(
                 a = int(fe)
                 if a in ref_nm_by_attempt:
                     ref_col[i] = ref_nm_by_attempt[a]
+                    ref_source_col[i] = "measure_ref"
 
     elif method == "high_hold_tail":
-        # For each oscillator cycle, use the mean of the last force_ref_frames
-        # valid samples of the high-voltage hold (the "hold" phase at the top
-        # of the voltage ramp).
         cycles = df["cycle"].to_numpy(dtype=object)
         phase_col = df["phase"].to_numpy(dtype=object)
         valid_mask = df["valid"].to_numpy(dtype=bool)
-
-        # Determine which hold is the "high" one per cycle: the hold with
-        # the higher mean voltage.
+        voltage = df["voltage_v"].to_numpy(dtype=float)
         hold_phase_mask = np.array(
             [p == "hold" if (p is not pd.NA and p is not None) else False for p in phase_col],
             dtype=bool,
@@ -1143,31 +1352,71 @@ def compute_force_reference(
         unique_cycles = sorted(
             set(int(c) for c in cycles if c is not pd.NA and c is not None)
         )
+        cycle_time_by_id: dict[int, float] = {}
         for cid in unique_cycles:
             cmask = np.array(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
             )
-            hold_mask = cmask & hold_phase_mask & valid_mask
-            if not hold_mask.any():
-                continue
-            hold_v = df["voltage_v"].to_numpy(dtype=float)
-            # Split hold samples into contiguous runs (may be two holds per cycle)
-            h_idx = np.where(hold_mask)[0]
-            if len(h_idx) == 0:
-                continue
-            hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
-            hold_groups = np.split(h_idx, hold_breaks)
-            # High-voltage hold = group with higher mean voltage
-            hold_groups_sorted = sorted(
-                hold_groups,
-                key=lambda g: float(np.nanmean(hold_v[g])),
-                reverse=True,
+            if np.any(cmask):
+                cycle_time_by_id[int(cid)] = float(df.loc[cmask, "time_s"].iloc[0])
+
+        ordered_cycle_ids = sorted(unique_cycles, key=lambda cid: cycle_time_by_id.get(int(cid), np.inf))
+        last_complete_ref = np.nan
+        for cid in ordered_cycle_ids:
+            cmask = np.array(
+                [c is not pd.NA and c is not None and c == cid for c in cycles],
+                dtype=bool,
             )
-            high_hold_idx = hold_groups_sorted[0]
-            tail_idx = high_hold_idx[-force_ref_frames:]
-            ref_val = float(np.nanmean(trap1[tail_idx]))
-            ref_col[cmask] = ref_val
+            cycle_complete = (
+                bool(df.loc[cmask, "cycle_complete"].dropna().astype(bool).all())
+                if "cycle_complete" in df.columns and df.loc[cmask, "cycle_complete"].notna().any()
+                else False
+            )
+            hold_mask = cmask & hold_phase_mask & valid_mask
+            ref_val = np.nan
+            source = pd.NA
+
+            cycle_top_voltage = np.nan
+            if hold_mask.any():
+                cycle_top_voltage = float(np.nanmax(voltage[hold_mask]))
+
+            if hold_mask.any():
+                h_idx = np.where(hold_mask)[0]
+                hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+                hold_groups = np.split(h_idx, hold_breaks)
+                hold_groups_sorted = sorted(
+                    hold_groups,
+                    key=lambda g: float(np.nanmean(voltage[g])),
+                    reverse=True,
+                )
+                high_hold_idx = hold_groups_sorted[0]
+                high_voltage = float(np.nanmean(voltage[high_hold_idx]))
+                if np.isfinite(high_voltage) and np.isfinite(cycle_top_voltage) and high_voltage >= cycle_top_voltage:
+                    tail_idx = high_hold_idx[-force_ref_frames:]
+                    ref_val = float(np.nanmean(trap1[tail_idx]))
+                    source = "own_high_hold"
+
+            if (not np.isfinite(ref_val) or source is pd.NA) and np.any(cmask):
+                cycle_tail = np.where(cmask)[0][-force_ref_frames:]
+                if len(cycle_tail):
+                    top_hold = (phase_col[cycle_tail] == "hold") & np.isfinite(voltage[cycle_tail])
+                    if np.isfinite(cycle_top_voltage):
+                        top_hold = top_hold & (voltage[cycle_tail] >= cycle_top_voltage)
+                    if np.any(top_hold):
+                        tail_idx = cycle_tail[top_hold]
+                        ref_val = float(np.nanmean(trap1[tail_idx[-force_ref_frames:]]))
+                        source = "own_relaxed_end"
+
+            if (not np.isfinite(ref_val) or source is pd.NA) and np.isfinite(last_complete_ref):
+                ref_val = float(last_complete_ref)
+                source = "previous_cycle"
+
+            if np.isfinite(ref_val):
+                ref_col[cmask] = ref_val
+                ref_source_col[cmask] = source
+            if cycle_complete and np.isfinite(ref_val):
+                last_complete_ref = ref_val
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
     force = (trap1 - ref_col) * stiff
@@ -1175,6 +1424,7 @@ def compute_force_reference(
     df["force_pn"] = np.where(finite_force, force, np.nan)
     df["force_ref_nm"] = ref_col
     df["force_ref_method"] = ref_method_col
+    df["force_ref_source"] = ref_source_col
 
     return df
 
@@ -1543,14 +1793,34 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
                 n_broke = int((outcomes == "broke").sum())
                 n_no_tether = int((outcomes == "no_tether").sum())
 
-    n_osc_cycles = (
-        df[df["mode"] == "oscillator"]["cycle"]
-        .dropna()
-        .astype(int)
-        .max()
-        if (df["mode"] == "oscillator").any()
-        else 0
-    )
+    n_osc_cycles = 0
+    n_complete_osc_cycles = 0
+    n_partial_osc_cycles = 0
+    if (df["mode"] == "oscillator").any():
+        osc = df[df["mode"] == "oscillator"]
+        if "cycle_complete" in osc.columns and osc["cycle_complete"].notna().any():
+            complete_cycle_ids = (
+                osc[osc["cycle_complete"].astype("boolean") == True]["cycle"]  # noqa: E712
+                .dropna()
+                .astype(int)
+                .unique()
+            )
+            partial_cycle_ids = (
+                osc[osc["cycle_complete"].astype("boolean") == False]["cycle"]  # noqa: E712
+                .dropna()
+                .astype(int)
+                .unique()
+            )
+            n_complete_osc_cycles = len(complete_cycle_ids)
+            n_partial_osc_cycles = len(partial_cycle_ids)
+            # Back-compat: legacy reporting kept the count of complete cycles
+            # only, while the new split counts are available separately.
+            n_osc_cycles = n_complete_osc_cycles
+        else:
+            cycle_ids = osc["cycle"].dropna().astype(int).unique()
+            n_osc_cycles = len(cycle_ids)
+            n_complete_osc_cycles = n_osc_cycles
+            n_partial_osc_cycles = 0
 
     # Count and warn about unknown state codes
     n_unknown_states = 0
@@ -1580,6 +1850,8 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         "n_survived": n_survived,
         "n_broke": n_broke,
         "n_no_tether": n_no_tether,
+        "n_complete_oscillator_cycles": int(n_complete_osc_cycles) if pd.notna(n_complete_osc_cycles) and n_complete_osc_cycles else 0,
+        "n_partial_oscillator_cycles": int(n_partial_osc_cycles) if pd.notna(n_partial_osc_cycles) and n_partial_osc_cycles else 0,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
         "n_unknown_state_frames": n_unknown_states,
     }
@@ -1874,13 +2146,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     # print per-run summary
-    print(f"{'Source':<30} {'FE_attempts':>11} {'Survived':>8} {'Broke':>6} {'Osc_cycles':>10}")
-    print("-" * 69)
+    print(
+        f"{'Source':<30} {'FE_attempts':>11} {'Survived':>8} {'Broke':>6} "
+        f"{'Complete':>10} {'Partial':>8}"
+    )
+    print("-" * 89)
     for s in summaries:
         print(
             f"{s['source']:<30} {s['n_tether_attempts']:>11} "
             f"{s['n_survived']:>8} {s['n_broke']:>6} "
-            f"{s['n_oscillator_cycles']:>10}"
+            f"{s['n_complete_oscillator_cycles']:>10} {s['n_partial_oscillator_cycles']:>8}"
         )
 
     # ------------------------------------------------------------------ #

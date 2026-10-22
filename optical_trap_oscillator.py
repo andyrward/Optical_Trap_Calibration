@@ -111,6 +111,23 @@ def _cycle_stats(df_cycle: pd.DataFrame) -> dict[str, Any]:
     finite = force_all[np.isfinite(force_all)]
     stats["peak_force_pn"] = float(np.max(np.abs(finite))) if len(finite) else float("nan")
 
+    # cycle completeness metadata
+    if "cycle_complete" in df_cycle.columns:
+        comp = df_cycle["cycle_complete"].dropna()
+        stats["cycle_complete"] = bool(comp.astype(bool).all()) if len(comp) else False
+    if "cycle_status" in df_cycle.columns:
+        st = df_cycle["cycle_status"].dropna()
+        stats["cycle_status"] = str(st.iloc[-1]) if len(st) else "unknown"
+    if "cycle_partial_reason" in df_cycle.columns:
+        reason = df_cycle["cycle_partial_reason"].dropna()
+        stats["cycle_partial_reason"] = str(reason.iloc[-1]) if len(reason) else ""
+    if "cycle_last_phase" in df_cycle.columns:
+        lp = df_cycle["cycle_last_phase"].dropna()
+        stats["cycle_last_phase"] = str(lp.iloc[-1]) if len(lp) else ""
+    if "cycle_next_state" in df_cycle.columns:
+        ns = df_cycle["cycle_next_state"].dropna()
+        stats["cycle_next_state"] = int(ns.iloc[-1]) if len(ns) else pd.NA
+
     return stats
 
 
@@ -260,7 +277,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--dv-dt-threshold",
         type=float,
         default=0.0003,
-        help="dV/dt threshold (V/sample) retained for back-compatibility; no longer used for oscillator phase assignment.",
+        help="dV/dt threshold (V/sample) used to classify stalled oscillator ramps as non-moving, while still preserving the cycle.",
     )
     parser.add_argument(
         "--force-ref",
@@ -334,7 +351,9 @@ def main(argv: list[str] | None = None) -> int:
 
             csv_path = out_dir / f"{source}_oscillator.csv"
             stats.to_csv(csv_path, index=False)
-            print(f"{source}: {len(stats)} cycle(s). CSV → {csv_path}")
+            complete_count = int((stats["cycle_complete"].astype(bool)).sum()) if "cycle_complete" in stats.columns else len(stats)
+            partial_count = int((~stats["cycle_complete"].astype(bool)).sum()) if "cycle_complete" in stats.columns else 0
+            print(f"{source}: {complete_count} complete cycle(s), {partial_count} partial cycle(s). CSV → {csv_path}")
 
             fig = plot_oscillator(df, stats)
             fig_path = out_dir / f"{source}_oscillator.png"
