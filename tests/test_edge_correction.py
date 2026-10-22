@@ -133,6 +133,16 @@ class TestEdgeCorrectionSentinel(unittest.TestCase):
             df["trap1_pos_nm"].to_numpy(),
         )
 
+    def test_positive_extension_with_edge_correction(self):
+        from optical_trap_edge_correction import correct_edge_tracking
+
+        df = _make_osc_df(n_frames=200)
+        result = correct_edge_tracking(df)
+
+        self.assertTrue(np.all(np.isfinite(result["extension_nm"])))
+        self.assertGreater(np.nanmax(result["extension_nm"]), 0.0)
+        self.assertGreater(np.nanmedian(result["extension_nm"]), 0.0)
+
 
 class TestEdgeCorrectionOffset(unittest.TestCase):
     """A +500 nm offset on the interface edge is detected and corrected."""

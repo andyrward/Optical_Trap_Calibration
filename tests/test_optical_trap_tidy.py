@@ -312,6 +312,26 @@ class TestOscillatorPartialCycles(unittest.TestCase):
         unassigned = (df["state_code"].isin([3, 4])) & (df["cycle"].isna())
         self.assertEqual(int(unassigned.sum()), 0)
 
+    def test_time_ordered_cycle_numbers(self):
+        states = [4] * 50 + [3] * 20 + [4] * 50 + [7] * 20 + [4] * 50 + [3] * 20 + [4] * 50
+        voltages = (
+            list(np.linspace(8.8, 5.6, 50))
+            + [5.6] * 20
+            + list(np.linspace(5.6, 8.8, 50))
+            + [8.8] * 20
+            + list(np.linspace(8.8, 5.6, 50))
+            + [5.6] * 20
+            + list(np.linspace(5.6, 8.8, 50))
+        )
+        df = self._run(states, voltages, smooth_window=15)
+        osc = df[df["mode"] == "oscillator"].copy()
+        cycle_starts = (
+            osc.groupby("cycle", dropna=True)["time_s"].first().sort_values().to_dict()
+        )
+        self.assertEqual(list(cycle_starts.keys()), [1, 2])
+        starts = list(cycle_starts.values())
+        self.assertLess(starts[0], starts[1])
+
 
 class TestValidMask(unittest.TestCase):
     """Tests for apply_valid_mask."""
@@ -586,6 +606,24 @@ class TestRegressionTether1_2(unittest.TestCase):
         # not used here.
         self.assertTrue((osc["cycle_complete"] == False).any())  # noqa: E712
 
+    def test_stalled_ramp_at_eof_kept_in_partial_cycle(self):
+        from optical_trap_tidy import load_tidy, find_routine_segments, label_cycles
+
+        repo_root = Path(__file__).resolve().parents[1]
+        path = repo_root / "example_data" / "tether1_2.dat"
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            df = load_tidy(path)
+        df = find_routine_segments(df)
+        df = label_cycles(df)
+
+        osc = df[df["mode"] == "oscillator"].copy()
+        partial = osc[osc["cycle_complete"] == False]
+        self.assertTrue((partial["cycle_status"] == "partial_end_of_file").any())
+        self.assertIn(8, set(partial["cycle"].dropna().astype(int).unique().tolist()))
+        self.assertIn("ramp_stalled", set(partial["cycle_last_phase"].dropna().astype(str).tolist()))
+        self.assertEqual(int((df["state_code"].isin([3, 4]) & df["cycle"].isna()).sum()), 0)
+
 
 class TestRegressionTether1Final(unittest.TestCase):
     @classmethod
@@ -620,9 +658,9 @@ class TestRegressionTether1Final(unittest.TestCase):
         osc = self.df[self.df["mode"] == "oscillator"].copy()
         complete_ids = sorted(osc[osc["cycle_complete"] == True]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
         partial_ids = sorted(osc[osc["cycle_complete"] == False]["cycle"].dropna().astype(int).unique().tolist())  # noqa: E712
-        self.assertEqual(complete_ids, list(range(1, 11)))
+        self.assertEqual(complete_ids, list(range(1, 8)) + [9, 10, 11])
         self.assertGreaterEqual(len(partial_ids), 2)
-        self.assertIn("partial_truncated", set(osc["cycle_status"].dropna().tolist()))
+        self.assertIn("partial_end_of_file", set(osc["cycle_status"].dropna().tolist()))
 
     def test_no_state3_or_state4_left_without_cycle(self):
         unassigned = (self.df["state_code"].isin([3, 4])) & (self.df["cycle"].isna())

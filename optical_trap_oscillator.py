@@ -277,7 +277,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--dv-dt-threshold",
         type=float,
         default=0.0003,
-        help="dV/dt threshold (V/sample) retained for back-compatibility; no longer used for oscillator phase assignment.",
+        help="dV/dt threshold (V/sample) used to classify stalled oscillator ramps as non-moving, while still preserving the cycle.",
     )
     parser.add_argument(
         "--force-ref",

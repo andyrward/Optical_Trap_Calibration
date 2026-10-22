@@ -968,8 +968,13 @@ def _finalize_oscillator_cycle_metadata(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[cyc_rows.index, "cycle_next_state"] = next_state
         is_complete = bool(cyc_rows["cycle_complete"].dropna().astype(bool).all()) if cyc_rows["cycle_complete"].notna().any() else False
         if not is_complete:
-            trailing_non_osc = df.iloc[end_idx + 1 :]["state_code"]
-            eof_partial = next_state is pd.NA or not trailing_non_osc.isin([3, 4]).any()
+            trailing_states = df.iloc[end_idx + 1 :]["state_code"]
+            if next_state is pd.NA:
+                eof_partial = True
+            elif int(next_state) == 2:
+                eof_partial = False
+            else:
+                eof_partial = not trailing_states.isin([3, 4]).any()
             status = "partial_end_of_file" if eof_partial else "partial_truncated"
             df.loc[cyc_rows.index, "cycle_status"] = status
             t0 = float(cyc_rows["time_s"].iloc[0])
@@ -1347,9 +1352,18 @@ def compute_force_reference(
         unique_cycles = sorted(
             set(int(c) for c in cycles if c is not pd.NA and c is not None)
         )
-        last_complete_ref = np.nan
-        last_complete_cycle_time = None
+        cycle_time_by_id: dict[int, float] = {}
         for cid in unique_cycles:
+            cmask = np.array(
+                [c is not pd.NA and c is not None and c == cid for c in cycles],
+                dtype=bool,
+            )
+            if np.any(cmask):
+                cycle_time_by_id[int(cid)] = float(df.loc[cmask, "time_s"].iloc[0])
+
+        ordered_cycle_ids = sorted(unique_cycles, key=lambda cid: cycle_time_by_id.get(int(cid), np.inf))
+        last_complete_ref = np.nan
+        for cid in ordered_cycle_ids:
             cmask = np.array(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
                 dtype=bool,
@@ -1359,12 +1373,13 @@ def compute_force_reference(
                 if "cycle_complete" in df.columns and df.loc[cmask, "cycle_complete"].notna().any()
                 else False
             )
-            cycle_time = None
-            if np.any(cmask):
-                cycle_time = float(df.loc[cmask, "time_s"].iloc[0])
             hold_mask = cmask & hold_phase_mask & valid_mask
             ref_val = np.nan
             source = pd.NA
+
+            cycle_top_voltage = np.nan
+            if hold_mask.any():
+                cycle_top_voltage = float(np.nanmax(voltage[hold_mask]))
 
             if hold_mask.any():
                 h_idx = np.where(hold_mask)[0]
@@ -1377,8 +1392,7 @@ def compute_force_reference(
                 )
                 high_hold_idx = hold_groups_sorted[0]
                 high_voltage = float(np.nanmean(voltage[high_hold_idx]))
-                top_voltage = float(np.nanmax(voltage[high_hold_idx])) if len(high_hold_idx) else np.nan
-                if np.isfinite(high_voltage) and top_voltage >= 8.5:
+                if np.isfinite(high_voltage) and np.isfinite(cycle_top_voltage) and high_voltage >= cycle_top_voltage:
                     tail_idx = high_hold_idx[-force_ref_frames:]
                     ref_val = float(np.nanmean(trap1[tail_idx]))
                     source = "own_high_hold"
@@ -1386,40 +1400,23 @@ def compute_force_reference(
             if (not np.isfinite(ref_val) or source is pd.NA) and np.any(cmask):
                 cycle_tail = np.where(cmask)[0][-force_ref_frames:]
                 if len(cycle_tail):
-                    top_hold = (phase_col[cycle_tail] == "hold") & (voltage[cycle_tail] >= 8.5)
+                    top_hold = (phase_col[cycle_tail] == "hold") & np.isfinite(voltage[cycle_tail])
+                    if np.isfinite(cycle_top_voltage):
+                        top_hold = top_hold & (voltage[cycle_tail] >= cycle_top_voltage)
                     if np.any(top_hold):
                         tail_idx = cycle_tail[top_hold]
                         ref_val = float(np.nanmean(trap1[tail_idx[-force_ref_frames:]]))
                         source = "own_relaxed_end"
 
-            if not np.isfinite(ref_val) or source is pd.NA:
-                prev_complete = None
-                prev_ref = np.nan
-                for prev_cid in unique_cycles:
-                    if prev_cid >= cid:
-                        break
-                    prev_mask = np.array([c is not pd.NA and c is not None and c == prev_cid for c in cycles], dtype=bool)
-                    prev_complete_flag = (
-                        bool(df.loc[prev_mask, "cycle_complete"].dropna().astype(bool).all())
-                        if "cycle_complete" in df.columns and df.loc[prev_mask, "cycle_complete"].notna().any()
-                        else False
-                    )
-                    if prev_complete_flag and np.isfinite(df.loc[prev_mask, "force_ref_nm"].dropna().iloc[0]) if len(df.loc[prev_mask, "force_ref_nm"].dropna()) else False:
-                        prev_complete = prev_cid
-                        prev_ref = float(df.loc[prev_mask, "force_ref_nm"].dropna().iloc[0])
-                if prev_complete is not None:
-                    ref_val = float(prev_ref)
-                    source = "previous_cycle"
-                elif np.isfinite(last_complete_ref):
-                    ref_val = float(last_complete_ref)
-                    source = "previous_cycle"
+            if (not np.isfinite(ref_val) or source is pd.NA) and np.isfinite(last_complete_ref):
+                ref_val = float(last_complete_ref)
+                source = "previous_cycle"
 
             if np.isfinite(ref_val):
                 ref_col[cmask] = ref_val
                 ref_source_col[cmask] = source
             if cycle_complete and np.isfinite(ref_val):
                 last_complete_ref = ref_val
-                last_complete_cycle_time = cycle_time
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
     force = (trap1 - ref_col) * stiff
