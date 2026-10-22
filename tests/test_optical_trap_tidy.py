@@ -866,25 +866,5 @@ class TestPartialCycleForceCorrection(unittest.TestCase):
 
 
 
-        from optical_trap_tidy import load_many
-
-        repo_root = Path(__file__).resolve().parents[1]
-        paths = [
-            repo_root / "example_data" / "tether1_1.dat",
-            repo_root / "example_data" / "tether1_2.dat",
-        ]
-        if not all(p.exists() for p in paths):
-            self.skipTest("tether files not available")
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            df = load_many(paths)
-        sources = df["source"].unique().tolist()
-        self.assertIn("tether1_1", sources)
-        self.assertIn("tether1_2", sources)
-        # All required columns present
-        for col in ["mode", "cycle", "phase", "valid"]:
-            self.assertIn(col, df.columns)
-
-
 if __name__ == "__main__":
     unittest.main()

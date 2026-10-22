@@ -2250,6 +2250,8 @@ def main(argv: list[str] | None = None) -> int:
                     force_ref_nm=args.force_ref_nm,
                     force_ref_frames=args.force_ref_frames,
                 )
+                if (df["mode"] == "oscillator").any():
+                    df = flag_low_force_cycles(df)
                 if force_ref_method in ("measure_ref",):
                     df = label_tether_detection_outcomes(df)
 

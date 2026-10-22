@@ -348,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
                     force_ref_nm=args.force_ref_nm,
                     force_ref_frames=args.force_ref_frames,
                 )
+                df = flag_low_force_cycles(df)
 
             source = df["source"].iloc[0]
             stats = analyze_oscillator(df, source=source)
