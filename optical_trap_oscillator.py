@@ -28,6 +28,7 @@ from optical_trap_tidy import (
     label_cycles,
     apply_valid_mask,
     compute_force_reference,
+    flag_low_force_cycles,
     _expand_paths,
 )
 
@@ -127,6 +128,12 @@ def _cycle_stats(df_cycle: pd.DataFrame) -> dict[str, Any]:
     if "cycle_next_state" in df_cycle.columns:
         ns = df_cycle["cycle_next_state"].dropna()
         stats["cycle_next_state"] = int(ns.iloc[-1]) if len(ns) else pd.NA
+    if "force_suspect" in df_cycle.columns:
+        fs = df_cycle["force_suspect"].dropna()
+        stats["force_suspect"] = bool(fs.astype(bool).any()) if len(fs) else False
+    if "force_ref_source" in df_cycle.columns:
+        frs = df_cycle["force_ref_source"].dropna()
+        stats["force_ref_source"] = str(frs.iloc[-1]) if len(frs) else ""
 
     return stats
 

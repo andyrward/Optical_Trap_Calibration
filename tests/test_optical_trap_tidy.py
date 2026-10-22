@@ -724,5 +724,167 @@ class TestLoadMany(unittest.TestCase):
             self.assertIn(col, df.columns)
 
 
+class TestPartialCycleForceCorrection(unittest.TestCase):
+    """Regression tests for the partial-cycle reference correction and force-suspect flag.
+
+    Uses tether1_final.dat: a known run with two partial cycles (8 and 12).
+    Cycle 8 is truncated and has only a low-voltage hold; without correction it
+    would read ~0 pN because it was using its own low-voltage hold as the
+    zero-force reference.  With the correction it should read close to the
+    preceding complete cycle's (cycle 7) hold force at the same voltage.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from optical_trap_tidy import (
+            load_tidy,
+            find_routine_segments,
+            label_cycles,
+            apply_valid_mask,
+            compute_force_reference,
+            flag_low_force_cycles,
+        )
+
+        repo_root = Path(__file__).resolve().parents[1]
+        path = repo_root / "example_data" / "tether1_final.dat"
+        if not path.exists():
+            raise unittest.SkipTest(f"tether1_final.dat not found: {path}")
+
+        # Use a nonzero k_per_mw so that force is meaningful
+        k_per_mw = 0.073
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            df = load_tidy(path, k_per_mw=k_per_mw)
+        df = find_routine_segments(df, mode="oscillator")
+        df = label_cycles(df)
+        df = apply_valid_mask(df)
+        df = compute_force_reference(df, method="high_hold_tail")
+        df = flag_low_force_cycles(df)
+        cls.df = df
+        cls.osc = df[df["mode"] == "oscillator"]
+
+    def _cycle_hold_mean_force(self, cycle_id: int) -> float:
+        """Mean force_pn during the LOWEST-voltage hold of the given cycle."""
+        cyc = self.osc[self.osc["cycle"] == cycle_id]
+        holds = cyc[cyc["phase"] == "hold"]
+        if holds.empty:
+            return float("nan")
+        # Find the hold group with the lowest mean voltage (measurement hold)
+        h_idx = holds.index.to_numpy()
+        breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+        grp_forces = []
+        for grp_idx in np.split(h_idx, breaks):
+            grp = self.osc.loc[grp_idx]
+            grp_forces.append((float(grp["voltage_v"].mean()), float(grp["force_pn"].mean())))
+        # Return force for the hold at the lowest voltage
+        grp_forces.sort(key=lambda x: x[0])
+        return grp_forces[0][1]
+
+    def test_cycle8_uses_prev_complete_high_hold(self):
+        """Cycle 8 must use the previous complete cycle's high-hold as reference."""
+        cyc8 = self.osc[self.osc["cycle"] == 8]
+        src = cyc8["force_ref_source"].dropna().iloc[0]
+        self.assertEqual(
+            str(src),
+            "prev_complete_high_hold",
+            "Cycle 8 should use prev_complete_high_hold reference, not its own low-voltage hold.",
+        )
+
+    def test_cycle8_force_consistent_with_complete_cycles(self):
+        """After correction, cycle 8 hold force should be close to cycle 7's."""
+        f7 = self._cycle_hold_mean_force(7)
+        f8 = self._cycle_hold_mean_force(8)
+        self.assertFalse(np.isnan(f7), "Cycle 7 hold force must be finite")
+        self.assertFalse(np.isnan(f8), "Cycle 8 hold force must be finite")
+        # Cycle 8 should be within 5% of cycle 7 at the same voltage
+        self.assertAlmostEqual(
+            f8,
+            f7,
+            delta=abs(f7) * 0.05,
+            msg=(
+                f"Cycle 8 hold force ({f8:.1f} pN) should be within 5% "
+                f"of cycle 7 ({f7:.1f} pN) after reference correction."
+            ),
+        )
+
+    def test_cycle8_not_flagged_after_correction(self):
+        """After the reference correction, cycle 8 should NOT be force_suspect."""
+        cyc8 = self.osc[self.osc["cycle"] == 8]
+        self.assertFalse(
+            cyc8["force_suspect"].any(),
+            "Cycle 8 should not be flagged as force_suspect after reference correction.",
+        )
+
+    def test_flag_catches_cycle_with_wrong_reference(self):
+        """flag_low_force_cycles must flag cycle 8 when given the uncorrected force."""
+        from optical_trap_tidy import (
+            load_tidy,
+            find_routine_segments,
+            label_cycles,
+            apply_valid_mask,
+            compute_force_reference,
+            flag_low_force_cycles,
+        )
+
+        repo_root = Path(__file__).resolve().parents[1]
+        path = repo_root / "example_data" / "tether1_final.dat"
+        k_per_mw = 0.073
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            df = load_tidy(path, k_per_mw=k_per_mw)
+        df = find_routine_segments(df, mode="oscillator")
+        df = label_cycles(df)
+        df = apply_valid_mask(df)
+        df = compute_force_reference(df, method="high_hold_tail")
+
+        # Simulate the old (wrong) reference for cycle 8: override its force_pn
+        # to what it would have been with its own low-voltage hold as reference.
+        cyc8_mask = (df["mode"] == "oscillator") & (df["cycle"] == 8)
+        hold8_mask = cyc8_mask & (df["phase"] == "hold")
+        stiff8 = float(df.loc[cyc8_mask, "stiffness_pn_per_nm"].iloc[0])
+        wrong_ref = float(df.loc[hold8_mask, "trap1_pos_nm"].mean())
+        df.loc[cyc8_mask, "force_pn"] = (df.loc[cyc8_mask, "trap1_pos_nm"] - wrong_ref) * stiff8
+        df.loc[cyc8_mask, "force_ref_nm"] = wrong_ref
+        df.loc[cyc8_mask, "force_ref_source"] = "own_high_hold"
+
+        df = flag_low_force_cycles(df)
+        osc = df[df["mode"] == "oscillator"]
+        cyc8 = osc[osc["cycle"] == 8]
+        self.assertTrue(
+            cyc8["force_suspect"].any(),
+            "Cycle 8 with wrong (low-voltage) reference should be flagged as force_suspect.",
+        )
+
+    def test_summarize_run_includes_force_suspect_count(self):
+        """summarize_run must include n_force_suspect_cycles."""
+        from optical_trap_tidy import summarize_run
+
+        summary = summarize_run(self.df)
+        self.assertIn("n_force_suspect_cycles", summary)
+        # With the corrected reference, no cycles should be suspect
+        self.assertEqual(summary["n_force_suspect_cycles"], 0)
+
+
+
+        from optical_trap_tidy import load_many
+
+        repo_root = Path(__file__).resolve().parents[1]
+        paths = [
+            repo_root / "example_data" / "tether1_1.dat",
+            repo_root / "example_data" / "tether1_2.dat",
+        ]
+        if not all(p.exists() for p in paths):
+            self.skipTest("tether files not available")
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            df = load_many(paths)
+        sources = df["source"].unique().tolist()
+        self.assertIn("tether1_1", sources)
+        self.assertIn("tether1_2", sources)
+        # All required columns present
+        for col in ["mode", "cycle", "phase", "valid"]:
+            self.assertIn(col, df.columns)
+
+
 if __name__ == "__main__":
     unittest.main()

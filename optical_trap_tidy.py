@@ -1363,6 +1363,10 @@ def compute_force_reference(
 
         ordered_cycle_ids = sorted(unique_cycles, key=lambda cid: cycle_time_by_id.get(int(cid), np.inf))
         last_complete_ref = np.nan
+        # Voltage of the high-hold in the last complete cycle (set dynamically,
+        # no hard-coded voltage values).  Used to detect partial cycles that
+        # never reached the high-hold phase.
+        last_complete_high_hold_voltage = np.nan
         for cid in ordered_cycle_ids:
             cmask = np.array(
                 [c is not pd.NA and c is not None and c == cid for c in cycles],
@@ -1381,6 +1385,7 @@ def compute_force_reference(
             if hold_mask.any():
                 cycle_top_voltage = float(np.nanmax(voltage[hold_mask]))
 
+            high_voltage = np.nan
             if hold_mask.any():
                 h_idx = np.where(hold_mask)[0]
                 hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
@@ -1392,7 +1397,22 @@ def compute_force_reference(
                 )
                 high_hold_idx = hold_groups_sorted[0]
                 high_voltage = float(np.nanmean(voltage[high_hold_idx]))
-                if np.isfinite(high_voltage) and np.isfinite(cycle_top_voltage) and high_voltage >= cycle_top_voltage:
+                # For incomplete cycles: only accept the own hold as a reference
+                # if it is at least as high as the last complete cycle's high-hold
+                # voltage.  A partial cycle whose only hold is at a lower voltage
+                # never reached the high-hold phase and must use the previous
+                # complete cycle's reference instead.
+                own_hold_ok = (
+                    np.isfinite(high_voltage)
+                    and np.isfinite(cycle_top_voltage)
+                    and high_voltage >= cycle_top_voltage
+                    and (
+                        cycle_complete
+                        or not np.isfinite(last_complete_high_hold_voltage)
+                        or high_voltage >= last_complete_high_hold_voltage
+                    )
+                )
+                if own_hold_ok:
                     tail_idx = high_hold_idx[-force_ref_frames:]
                     ref_val = float(np.nanmean(trap1[tail_idx]))
                     source = "own_high_hold"
@@ -1403,6 +1423,15 @@ def compute_force_reference(
                     top_hold = (phase_col[cycle_tail] == "hold") & np.isfinite(voltage[cycle_tail])
                     if np.isfinite(cycle_top_voltage):
                         top_hold = top_hold & (voltage[cycle_tail] >= cycle_top_voltage)
+                    # For incomplete cycles, do not accept a "relaxed end" hold
+                    # that is below the last complete cycle's high-hold voltage.
+                    if (
+                        not cycle_complete
+                        and np.isfinite(last_complete_high_hold_voltage)
+                        and np.isfinite(cycle_top_voltage)
+                        and cycle_top_voltage < last_complete_high_hold_voltage
+                    ):
+                        top_hold[:] = False
                     if np.any(top_hold):
                         tail_idx = cycle_tail[top_hold]
                         ref_val = float(np.nanmean(trap1[tail_idx[-force_ref_frames:]]))
@@ -1410,13 +1439,19 @@ def compute_force_reference(
 
             if (not np.isfinite(ref_val) or source is pd.NA) and np.isfinite(last_complete_ref):
                 ref_val = float(last_complete_ref)
-                source = "previous_cycle"
+                source = (
+                    "prev_complete_high_hold"
+                    if not cycle_complete
+                    else "previous_cycle"
+                )
 
             if np.isfinite(ref_val):
                 ref_col[cmask] = ref_val
                 ref_source_col[cmask] = source
             if cycle_complete and np.isfinite(ref_val):
                 last_complete_ref = ref_val
+                if source == "own_high_hold" and np.isfinite(high_voltage):
+                    last_complete_high_hold_voltage = high_voltage
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
     force = (trap1 - ref_col) * stiff
@@ -1425,6 +1460,132 @@ def compute_force_reference(
     df["force_ref_nm"] = ref_col
     df["force_ref_method"] = ref_method_col
     df["force_ref_source"] = ref_source_col
+
+    return df
+
+
+def flag_low_force_cycles(
+    df: pd.DataFrame,
+    n_sigma: float = 3.0,
+) -> pd.DataFrame:
+    """Flag oscillator cycles whose hold force is implausibly low.
+
+    A cycle is marked ``force_suspect = True`` when its mean hold force at a
+    given hold voltage is more than *n_sigma* standard deviations below the
+    mean of *complete* cycles at the same hold voltage (within ±0.1 V).  The
+    high-voltage reference hold (where force is near zero by definition) is
+    excluded from the comparison.
+
+    Call this **after** :func:`compute_force_reference`.
+
+    Parameters
+    ----------
+    df:
+        Tidy DataFrame with ``force_pn`` already populated.
+    n_sigma:
+        Sensitivity of the low-force check (default 3.0).
+
+    Returns
+    -------
+    DataFrame with a new boolean ``force_suspect`` column (one value per row;
+    all rows within a cycle share the same flag).
+    """
+    df = df.copy()
+    df["force_suspect"] = False
+
+    osc_mask = df["mode"] == "oscillator"
+    if not osc_mask.any():
+        return df
+
+    osc = df[osc_mask]
+    if "force_pn" not in osc.columns or osc["force_pn"].isna().all():
+        return df
+
+    if (osc["phase"] == "hold").sum() == 0:
+        return df
+
+    # ------------------------------------------------------------------ #
+    # Step 1: collect per-hold-group stats for complete cycles, keyed by  #
+    #         rounded voltage (0.1 V bins).                                #
+    # ------------------------------------------------------------------ #
+    complete_hold_force_by_v: dict[float, list[float]] = {}
+    cycle_complete_col = osc["cycle_complete"] if "cycle_complete" in osc.columns else None
+
+    for cid in osc["cycle"].dropna().unique():
+        cyc = osc[osc["cycle"] == cid]
+        if cycle_complete_col is not None:
+            comp_vals = cyc["cycle_complete"].dropna()
+            is_complete = bool(comp_vals.astype(bool).all()) if len(comp_vals) else False
+        else:
+            is_complete = True  # treat all as complete if column absent
+        if not is_complete:
+            continue
+        cyc_holds = cyc[cyc["phase"] == "hold"]
+        if cyc_holds.empty:
+            continue
+        h_idx = cyc_holds.index.to_numpy()
+        hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+        for grp_idx in np.split(h_idx, hold_breaks):
+            grp = osc.loc[grp_idx]
+            mean_v = round(float(grp["voltage_v"].mean()), 1)
+            finite_f = grp["force_pn"].dropna()
+            if len(finite_f) == 0:
+                continue
+            complete_hold_force_by_v.setdefault(mean_v, []).append(float(finite_f.mean()))
+
+    if not complete_hold_force_by_v:
+        return df
+
+    # ------------------------------------------------------------------ #
+    # Step 2: identify the reference-hold voltage bin (the one whose mean  #
+    #         force across complete cycles is closest to zero).  This hold  #
+    #         is the zero-force baseline and is excluded from the check.    #
+    # ------------------------------------------------------------------ #
+    ref_v_key = min(
+        complete_hold_force_by_v,
+        key=lambda v: abs(float(np.mean(complete_hold_force_by_v[v]))),
+    )
+
+    # Build reference statistics (mean ± std) for non-reference hold bins
+    ref_stats: dict[float, tuple[float, float]] = {}
+    for v, forces in complete_hold_force_by_v.items():
+        if v == ref_v_key:
+            continue
+        arr = np.array(forces, dtype=float)
+        ref_stats[v] = (float(np.mean(arr)), float(np.std(arr)) if len(arr) > 1 else 0.0)
+
+    if not ref_stats:
+        return df
+
+    # ------------------------------------------------------------------ #
+    # Step 3: for each cycle flag holds whose force is implausibly low.   #
+    # ------------------------------------------------------------------ #
+    suspect_cycle_ids: set = set()
+    for cid in osc["cycle"].dropna().unique():
+        cyc = osc[osc["cycle"] == cid]
+        cyc_holds = cyc[cyc["phase"] == "hold"]
+        if cyc_holds.empty:
+            continue
+        h_idx = cyc_holds.index.to_numpy()
+        hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
+        for grp_idx in np.split(h_idx, hold_breaks):
+            grp = osc.loc[grp_idx]
+            mean_v = round(float(grp["voltage_v"].mean()), 1)
+            if mean_v not in ref_stats:
+                continue  # skip the reference-hold bin and any untracked bins
+            finite_f = grp["force_pn"].dropna()
+            if len(finite_f) == 0:
+                continue
+            mean_f = float(finite_f.mean())
+            ref_mean, ref_std = ref_stats[mean_v]
+            threshold = n_sigma * ref_std if ref_std > 0 else 1.0
+            if mean_f < ref_mean - threshold:
+                suspect_cycle_ids.add(cid)
+
+    # Write flag back to every row of the flagged cycles
+    if suspect_cycle_ids:
+        flagged_rows = osc["cycle"].isin(suspect_cycle_ids)
+        df.loc[osc[flagged_rows].index, "force_suspect"] = True
 
     return df
 
@@ -1822,6 +1983,19 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
             n_complete_osc_cycles = n_osc_cycles
             n_partial_osc_cycles = 0
 
+    # Count force_suspect cycles (set by flag_low_force_cycles)
+    n_force_suspect_cycles = 0
+    if (df["mode"] == "oscillator").any():
+        osc_df = df[df["mode"] == "oscillator"]
+        if "force_suspect" in osc_df.columns and osc_df["force_suspect"].any():
+            suspect_cycle_ids = (
+                osc_df[osc_df["force_suspect"].astype(bool)]["cycle"]
+                .dropna()
+                .astype(int)
+                .unique()
+            )
+            n_force_suspect_cycles = len(suspect_cycle_ids)
+
     # Count and warn about unknown state codes
     n_unknown_states = 0
     if "state_code" in df.columns:
@@ -1853,6 +2027,7 @@ def summarize_run(df: pd.DataFrame) -> dict[str, Any]:
         "n_complete_oscillator_cycles": int(n_complete_osc_cycles) if pd.notna(n_complete_osc_cycles) and n_complete_osc_cycles else 0,
         "n_partial_oscillator_cycles": int(n_partial_osc_cycles) if pd.notna(n_partial_osc_cycles) and n_partial_osc_cycles else 0,
         "n_oscillator_cycles": int(n_osc_cycles) if pd.notna(n_osc_cycles) and n_osc_cycles else 0,
+        "n_force_suspect_cycles": int(n_force_suspect_cycles),
         "n_unknown_state_frames": n_unknown_states,
     }
     result.update(edge_summary)
