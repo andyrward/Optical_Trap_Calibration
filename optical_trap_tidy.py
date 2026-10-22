@@ -1450,8 +1450,12 @@ def compute_force_reference(
                 ref_source_col[cmask] = source
             if cycle_complete and np.isfinite(ref_val):
                 last_complete_ref = ref_val
-                if source == "own_high_hold" and np.isfinite(high_voltage):
-                    last_complete_high_hold_voltage = high_voltage
+            if cycle_complete and np.isfinite(high_voltage):
+                last_complete_high_hold_voltage = high_voltage
+            elif cycle_complete and not np.isfinite(high_voltage):
+                # Keep the previous high-hold voltage for subsequent partial-cycle
+                # checks when this complete cycle has no usable high-hold data.
+                pass
 
     # Compute force: positive when trap1 displaced toward higher nm (tension)
     force = (trap1 - ref_col) * stiff
@@ -1467,14 +1471,16 @@ def compute_force_reference(
 def flag_low_force_cycles(
     df: pd.DataFrame,
     n_sigma: float = 3.0,
+    voltage_bin_width_v: float = 0.1,
+    zero_variance_threshold_pn: float = 1.0,
 ) -> pd.DataFrame:
     """Flag oscillator cycles whose hold force is implausibly low.
 
     A cycle is marked ``force_suspect = True`` when its mean hold force at a
-    given hold voltage is more than *n_sigma* standard deviations below the
-    mean of *complete* cycles at the same hold voltage (within ±0.1 V).  The
-    high-voltage reference hold (where force is near zero by definition) is
-    excluded from the comparison.
+    given hold voltage deviates by more than *n_sigma* standard deviations from
+    the mean of *complete* cycles at the same hold voltage (within ±
+    *voltage_bin_width_v*). The high-voltage reference hold (where force is near
+    zero by definition) is excluded from the comparison.
 
     Call this **after** :func:`compute_force_reference`.
 
@@ -1484,12 +1490,21 @@ def flag_low_force_cycles(
         Tidy DataFrame with ``force_pn`` already populated.
     n_sigma:
         Sensitivity of the low-force check (default 3.0).
+    voltage_bin_width_v:
+        Width of the voltage bins used to compare hold forces across cycles.
+    zero_variance_threshold_pn:
+        Conservative fallback threshold when all complete-cycle hold forces in a
+        voltage bin are identical; this avoids a zero-width standard deviation
+        that would otherwise make the low-force check degenerate.
 
     Returns
     -------
     DataFrame with a new boolean ``force_suspect`` column (one value per row;
     all rows within a cycle share the same flag).
     """
+    if voltage_bin_width_v <= 0:
+        raise ValueError("voltage_bin_width_v must be positive")
+
     df = df.copy()
     df["force_suspect"] = False
 
@@ -1504,9 +1519,16 @@ def flag_low_force_cycles(
     if (osc["phase"] == "hold").sum() == 0:
         return df
 
+    # Work with a single named voltage bin width to keep the complete-cycle
+    # comparison stable if the bin spacing needs to be tuned later.
+    # A 1 pN fallback threshold is a conservative non-zero floor when the
+    # reference distribution has zero variance.
+    def _bin_key(value: float) -> float:
+        return float(np.round(float(value) / voltage_bin_width_v) * voltage_bin_width_v)
+
     # ------------------------------------------------------------------ #
     # Step 1: collect per-hold-group stats for complete cycles, keyed by  #
-    #         rounded voltage (0.1 V bins).                                #
+    #         voltage bins of width *voltage_bin_width_v*.                #
     # ------------------------------------------------------------------ #
     complete_hold_force_by_v: dict[float, list[float]] = {}
     cycle_complete_col = osc["cycle_complete"] if "cycle_complete" in osc.columns else None
@@ -1527,7 +1549,7 @@ def flag_low_force_cycles(
         hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
         for grp_idx in np.split(h_idx, hold_breaks):
             grp = osc.loc[grp_idx]
-            mean_v = round(float(grp["voltage_v"].mean()), 1)
+            mean_v = _bin_key(float(grp["voltage_v"].mean()))
             finite_f = grp["force_pn"].dropna()
             if len(finite_f) == 0:
                 continue
@@ -1570,7 +1592,7 @@ def flag_low_force_cycles(
         hold_breaks = np.where(np.diff(h_idx) > 1)[0] + 1
         for grp_idx in np.split(h_idx, hold_breaks):
             grp = osc.loc[grp_idx]
-            mean_v = round(float(grp["voltage_v"].mean()), 1)
+            mean_v = _bin_key(float(grp["voltage_v"].mean()))
             if mean_v not in ref_stats:
                 continue  # skip the reference-hold bin and any untracked bins
             finite_f = grp["force_pn"].dropna()
@@ -1578,8 +1600,8 @@ def flag_low_force_cycles(
                 continue
             mean_f = float(finite_f.mean())
             ref_mean, ref_std = ref_stats[mean_v]
-            threshold = n_sigma * ref_std if ref_std > 0 else 1.0
-            if mean_f < ref_mean - threshold:
+            threshold = n_sigma * ref_std if ref_std > 0 else zero_variance_threshold_pn
+            if abs(mean_f - ref_mean) > threshold:
                 suspect_cycle_ids.add(cid)
 
     # Write flag back to every row of the flagged cycles
@@ -2250,8 +2272,7 @@ def main(argv: list[str] | None = None) -> int:
                     force_ref_nm=args.force_ref_nm,
                     force_ref_frames=args.force_ref_frames,
                 )
-                if (df["mode"] == "oscillator").any():
-                    df = flag_low_force_cycles(df)
+                df = flag_low_force_cycles(df)
                 if force_ref_method in ("measure_ref",):
                     df = label_tether_detection_outcomes(df)
 

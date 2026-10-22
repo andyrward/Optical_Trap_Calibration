@@ -845,7 +845,7 @@ class TestPartialCycleForceCorrection(unittest.TestCase):
         wrong_ref = float(df.loc[hold8_mask, "trap1_pos_nm"].mean())
         df.loc[cyc8_mask, "force_pn"] = (df.loc[cyc8_mask, "trap1_pos_nm"] - wrong_ref) * stiff8
         df.loc[cyc8_mask, "force_ref_nm"] = wrong_ref
-        df.loc[cyc8_mask, "force_ref_source"] = "own_high_hold"
+        df.loc[cyc8_mask, "force_ref_source"] = "low_hold"
 
         df = flag_low_force_cycles(df)
         osc = df[df["mode"] == "oscillator"]
