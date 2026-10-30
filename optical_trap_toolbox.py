@@ -179,16 +179,199 @@ def _align_series(series: np.ndarray, length: int) -> np.ndarray:
     return np.interp(target_x, source_x, series)
 
 
+def _coerce_numeric_rows(text: str) -> list[list[float]]:
+    rows: list[list[float]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        tokens = [token for token in re.split(r"[\t, ]+", line) if token]
+        if not tokens:
+            continue
+        try:
+            numeric = [float(token) for token in tokens]
+        except ValueError:
+            continue
+        rows.append(numeric)
+    return rows
+
+
+def _legacy_params_result(path: str | Path | None = None) -> dict[str, Any]:
+    result = {
+        "path": str(Path(path)) if path is not None else None,
+        "mode_code": None,
+        "code": None,
+        "mode": None,
+        "mode_name": None,
+        "acquisition_mode": None,
+        "legacy": True,
+        "valid": False,
+        "tether_voltages": [],
+        "oscillator_voltages": [],
+        "oscillator_waits": [],
+        "puppet_schedule": [],
+        "schedule_rows": [],
+        "schedule": [],
+    }
+    return result
+
+
+def find_companion_params_path(data_path: str | Path) -> Path | None:
+    """Return the companion ``*_params.dat`` next to a ``.dat`` file if present."""
+    path = Path(data_path)
+    stem = path.stem if path.suffix else path.name
+    candidates = [
+        path.with_name(f"{stem}_params.dat"),
+        path.with_name(f"{path.name}_params.dat") if path.suffix else path.with_name(f"{path.name}_params.dat"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def read_acquisition_params(path: str | Path | None = None) -> dict[str, Any]:
+    """Read a companion ``*_params.dat`` file.
+
+    The newer instrument writes the acquisition mode in the first non-empty row,
+    usually repeated across four columns, followed by mode-specific values. The
+    legacy/blank files used by older datasets contain ``0`` or no schedule data;
+    those are treated as compatibility metadata rather than hard failures.
+
+    Format (confirmed from instrument export):
+    * mode code row: ``0`` / ``1`` / ``2`` / ``3`` repeated (calibration,
+      tether formation, oscillator, puppet)
+    * tether formation: one row of ``touch_V, reference_V, tether_V, end_V``
+    * oscillator: one row of ``low_force_V, low_wait_s, high_force_V, high_wait_s``
+    * puppet: N rows of ``target_V, ramp_rate_or_time, hold_length, step_index``
+
+    Older datasets with blank / ``0`` files are intentionally accepted as legacy
+    and leave mode detection to the state-voltage traces.
+    """
+    if path is None:
+        return _legacy_params_result()
+
+    data_path = Path(path)
+    if not data_path.exists():
+        return _legacy_params_result(data_path)
+
+    try:
+        text = data_path.read_text(encoding="utf-8", errors="ignore").replace("\r", "")
+    except OSError:
+        return _legacy_params_result(data_path)
+
+    rows = _coerce_numeric_rows(text)
+    if not rows:
+        return _legacy_params_result(data_path)
+
+    first_row = rows[0]
+    first_value = float(first_row[0])
+    mode_code = int(round(first_value)) if np.isfinite(first_value) else None
+    if mode_code not in (0, 1, 2, 3):
+        return _legacy_params_result(data_path)
+
+    mode_name = {
+        0: "calibration",
+        1: "tether_formation",
+        2: "oscillator",
+        3: "puppet",
+    }.get(mode_code)
+
+    schedule_rows: list[list[float]] = []
+    for raw_row in rows[1:]:
+        if not raw_row:
+            continue
+        if len(raw_row) < 4:
+            continue
+        schedule_rows.append([float(value) for value in raw_row[:4]])
+
+    result: dict[str, Any] = {
+        "path": str(data_path),
+        "mode_code": mode_code,
+        "code": mode_code,
+        "mode": mode_name,
+        "mode_name": mode_name,
+        "acquisition_mode": mode_name,
+        "legacy": mode_code == 0 or not schedule_rows,
+        "valid": True,
+        "tether_voltages": [],
+        "oscillator_voltages": [],
+        "oscillator_waits": [],
+        "puppet_schedule": [],
+        "schedule_rows": schedule_rows,
+        "schedule": schedule_rows,
+    }
+
+    if mode_code == 1:
+        volts = [float(v) for v in schedule_rows[0][:4]] if schedule_rows else []
+        result["tether_voltages"] = volts
+    elif mode_code == 2:
+        if schedule_rows:
+            first = [float(v) for v in schedule_rows[0][:4]]
+            result["oscillator_voltages"] = [first[0], first[2]]
+            result["oscillator_waits"] = [first[1], first[3]]
+    elif mode_code == 3:
+        result["puppet_schedule"] = [
+            {
+                "target_v": float(row[0]),
+                "ramp_or_time": float(row[1]),
+                "hold_length": float(row[2]),
+                "step_index": int(round(float(row[3]))),
+            }
+            for row in schedule_rows
+        ]
+        result["schedule"] = result["puppet_schedule"]
+
+    if mode_code == 0:
+        result["legacy"] = True
+        result["schedule"] = []
+        result["schedule_rows"] = []
+        result["puppet_schedule"] = []
+    return result
+
+
+def read_companion_params(data_path: str | Path) -> dict[str, Any]:
+    """Read a companion ``*_params.dat`` beside a data file, or return legacy metadata."""
+    path = Path(data_path)
+    params_path = find_companion_params_path(path)
+    if params_path is None:
+        return _legacy_params_result(path)
+    return read_acquisition_params(params_path)
+
+
+parse_acquisition_params = read_acquisition_params
+parse_params_file = read_acquisition_params
+read_params_file = read_acquisition_params
+load_params_file = read_acquisition_params
+
+
 def load_normalized_trace(
     filepath: str | Path,
     *,
     companion_voltage_path: str | Path | None = None,
+    companion_params_path: str | Path | None = None,
 ) -> dict[str, np.ndarray]:
     data = _load_numeric_table(filepath)
     n_rows, n_cols = data.shape
     trace: dict[str, np.ndarray] = {key: np.full(n_rows, np.nan) for key in NORMALIZED_SCHEMA}
 
     trace["time_s"] = data[:, 0]
+
+    if companion_params_path is not None:
+        params_path = Path(companion_params_path)
+    else:
+        params_path = find_companion_params_path(filepath)
+    if params_path is not None:
+        params = read_acquisition_params(params_path)
+        trace["acquisition_mode"] = np.full(n_rows, params.get("mode") or "unknown", dtype=object)
+        trace["acquisition_mode_code"] = np.full(n_rows, params.get("mode_code"), dtype=float)
+        trace["params_path"] = np.full(n_rows, str(params_path), dtype=object)
+        trace["params_legacy"] = np.full(n_rows, bool(params.get("legacy", False)), dtype=bool)
+    else:
+        trace["acquisition_mode"] = np.full(n_rows, "unknown", dtype=object)
+        trace["acquisition_mode_code"] = np.full(n_rows, np.nan, dtype=float)
+        trace["params_path"] = np.full(n_rows, "", dtype=object)
+        trace["params_legacy"] = np.full(n_rows, True, dtype=bool)
 
     if n_cols == 6:
         # MATLAB stateful layout: [t, z, F, V, k, State]. Position channels are not present.
