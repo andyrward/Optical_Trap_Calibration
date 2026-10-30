@@ -57,6 +57,7 @@ import pandas as pd
 
 from optical_trap_toolbox import (
     load_normalized_trace,
+    read_companion_params,
     segment_state_runs,
     STATE_LABELS,
 )
@@ -222,6 +223,7 @@ def load_tidy(
     # --- load raw trace -------------------------------------------------------
     trace = load_normalized_trace(path)
     n = trace["time_s"].size
+    params = read_companion_params(path)
 
     # --- build tidy columns --------------------------------------------------
     trap1 = trace.get("position_1_nm", np.full(n, np.nan))
@@ -270,8 +272,14 @@ def load_tidy(
             "edge2_raw_nm": edge2_raw,
             "edge3_raw_nm": edge3_raw,
             "edge4_raw_nm": edge4_raw,
-            # placeholders filled by downstream functions
+            # Acquisition metadata from companion *_params.dat, if present.
+            # This is informational only; mode detection still defaults to the
+            # trace/state-based logic for back-compatibility with older data.
             "mode": "other",
+            "acquisition_mode": trace.get("acquisition_mode", np.full(n, "unknown", dtype=object)),
+            "acquisition_mode_code": trace.get("acquisition_mode_code", np.full(n, np.nan, dtype=float)),
+            "params_path": trace.get("params_path", np.full(n, "", dtype=object)),
+            "params_legacy": trace.get("params_legacy", np.full(n, True, dtype=bool)),
             "cycle": pd.NA,
             "phase": pd.NA,
             "setpoint_v": pd.NA,
