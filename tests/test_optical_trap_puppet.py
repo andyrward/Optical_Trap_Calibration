@@ -201,13 +201,11 @@ class TestPhaseSegmentation(unittest.TestCase):
             self.skipTest("Real fixture not found")
         from optical_trap_puppet import read_puppet
         df = read_puppet(_PUPPET_DAT)
-        hold_levels = df[df["phase"] == "hold"]["hold_voltage"].dropna().unique()
-        # Round to 1 decimal
-        rounded = set(np.round(hold_levels, 1))
-        self.assertIn(8.8, rounded | {8.75, 8.7, 8.8},  # generous tolerance
-                      "Expected high-voltage hold near 8.75 V")
-        self.assertIn(5.5, rounded | {5.5, 5.6},
-                      "Expected low-voltage hold near 5.5 V")
+        hold_levels = np.sort(np.unique(np.round(df[df["phase"] == "hold"]["hold_voltage"].dropna(), 2)))
+        self.assertTrue(np.any(np.isclose(hold_levels, 8.75, atol=0.1)),
+                        "Expected high-voltage hold near 8.75 V")
+        self.assertTrue(np.any(np.isclose(hold_levels, 5.5, atol=0.1)),
+                        "Expected low-voltage hold near 5.5 V")
 
     def test_hold_segments_present(self):
         if not _PUPPET_DAT.exists():

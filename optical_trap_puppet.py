@@ -14,7 +14,6 @@ The voltage source is resolved in this order:
    present alongside the main ``.dat`` file.
 2. Voltage/power columns embedded in the main file (newer instrument format)
    when they are present.
-3. A scalar ``power`` and/or ``k`` passed directly by the caller.
 
 If no voltage source can be found, ``read_puppet`` raises :class:`ValueError`.
 
@@ -243,8 +242,7 @@ def read_puppet(
     Raises
     ------
     ValueError
-        If no voltage source (companion file, embedded columns, or *power*
-        argument) can be found.
+        If no voltage source (companion file or embedded columns) can be found.
     FileNotFoundError
         If *path* does not exist.
     """
@@ -325,8 +323,8 @@ def read_puppet(
     if np.all(np.isnan(voltage_v)):
         raise ValueError(
             f"{path.name}: no voltage source found. "
-            "Provide a companion '*_Voltage.dat' file, use a newer-format "
-            "main file with embedded voltage columns, or pass `power` directly."
+            "Provide a companion '*_Voltage.dat' file or use a newer-format "
+            "main file with embedded voltage columns."
         )
 
     # ------------------------------------------------------------------
