@@ -346,6 +346,48 @@ class TestForce(unittest.TestCase):
             "Pull-out and pull-in force references should generally differ"
         )
 
+    def test_force_ref_override_used(self):
+        """A user-supplied force_ref_nm should override the automatic one."""
+        if not _PUPPET_DAT.exists():
+            self.skipTest("Real fixture not found")
+        from optical_trap_puppet import read_puppet
+        ref_nm = 123.456
+        df = read_puppet(_PUPPET_DAT, k=0.01, force_ref_nm=ref_nm)
+        self.assertTrue(np.allclose(df["force_ref_nm"].to_numpy(), ref_nm),
+                        "force_ref_nm should be fixed when supplied")
+        self.assertTrue(np.allclose(df["force_pn"].to_numpy(), (df["trap1_nm"] - ref_nm) * 0.01),
+                        "force_pn should use the caller-supplied force reference")
+
+    def test_bead_radius_correction_and_diagnostics(self):
+        """Raw extension is preserved, corrected extension subtracts bead radii."""
+        from optical_trap_puppet import read_puppet
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            n = 50
+            time = np.arange(n, dtype=float) * 0.001
+            edge = np.tile([5000.0, 12000.0, 8000.0, 9000.0], (n, 1))
+            state = np.zeros((n, 1))
+            act = np.zeros((n, 1))
+            pwr = np.full((n, 1), 1000.0)
+            v = np.full((n, 1), 8.75)
+            data = np.hstack([time[:, None], edge, state, act, pwr, v])
+            dat_path = d / "radius_check.dat"
+            np.savetxt(str(dat_path), data, fmt="%.6f")
+            p, vtrace = _synthetic_voltage(n=n)
+            _write_volt(d / "radius_check_Voltage.dat", p, vtrace)
+            df = read_puppet(dat_path, k=0.01)
+
+        raw_ext = df["extension_nm"].iloc[0]
+        r1 = df["bead1_radius_nm"].iloc[0]
+        r2 = df["bead2_radius_nm"].iloc[0]
+        expected = raw_ext - r1 - r2
+        self.assertIn("extension_nm_corrected", df.columns)
+        self.assertIn("bead1_diameter_nm", df.columns)
+        self.assertIn("bead2_diameter_nm", df.columns)
+        self.assertAlmostEqual(df["extension_nm_corrected"].iloc[0], expected, places=6)
+        self.assertGreater(df["bead1_diameter_nm"].iloc[0], 0.0)
+        self.assertGreater(df["bead2_diameter_nm"].iloc[0], 0.0)
+
 
 class TestRupture(unittest.TestCase):
     """Rupture detection."""

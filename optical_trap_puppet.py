@@ -201,6 +201,7 @@ def read_puppet(
     power: float | Sequence[float] | None = None,
     *,
     companion_voltage_path: str | Path | None = None,
+    force_ref_nm: float | None = None,
     smooth_window: int = 500,
     dv_threshold: float = 1e-4,
     rupture_threshold_nm: float = 500.0,
@@ -223,6 +224,10 @@ def read_puppet(
     companion_voltage_path:
         Explicit path to the companion voltage/power file.  If ``None``, the
         loader looks for ``<stem>_Voltage.dat`` next to *path*.
+    force_ref_nm:
+        Optional fixed force reference in nm. When supplied, ``force_pn`` is
+        computed as ``(trap1_nm - force_ref_nm) * k_eff`` for every row instead
+        of using the automatic preceding-hold reference.
     smooth_window:
         Width (samples) of the uniform smoothing kernel applied to the voltage
         trace before differentiation for segment detection.
@@ -336,7 +341,24 @@ def read_puppet(
     hold_voltage = _hold_voltage_array(phase_arr, voltage_v, seg_id)
 
     # ------------------------------------------------------------------
-    # 6.  Force computation
+    # 6.  Bead-radius correction diagnostics
+    # ------------------------------------------------------------------
+    # Keep the raw extension intact for auditability.  For a first-pass estimate,
+    # compute each bead radius from the median valid outer-to-inner edge spacing.
+    valid_mask = valid & np.isfinite(data[:, 1:5]).all(axis=1)
+    bead1_outer = data[:, 1]
+    bead1_inner = data[:, 3]
+    bead2_outer = data[:, 2]
+    bead2_inner = data[:, 4]
+
+    bead1_diameter_nm = np.abs(np.median(bead1_inner[valid_mask] - bead1_outer[valid_mask])) if np.any(valid_mask) else np.nan
+    bead2_diameter_nm = np.abs(np.median(bead2_inner[valid_mask] - bead2_outer[valid_mask])) if np.any(valid_mask) else np.nan
+    bead1_radius_nm = bead1_diameter_nm / 2.0
+    bead2_radius_nm = bead2_diameter_nm / 2.0
+    extension_corrected = extension - bead1_radius_nm - bead2_radius_nm
+
+    # ------------------------------------------------------------------
+    # 7.  Force computation
     # ------------------------------------------------------------------
     # Resolve effective stiffness
     if k is not None:
@@ -346,19 +368,22 @@ def read_puppet(
     else:
         k_eff = np.full(n_rows, np.nan)
 
-    # Dual-zero reference: preceding hold mean
-    force_ref = _assign_force_refs(trap1, phase_arr, seg_id, valid)
+    # Dual-zero reference: preceding hold mean, unless a fixed reference is supplied.
+    if force_ref_nm is not None:
+        force_ref = np.full(n_rows, float(force_ref_nm), dtype=float)
+    else:
+        force_ref = _assign_force_refs(trap1, phase_arr, seg_id, valid)
 
     with np.errstate(invalid="ignore"):
         force_pn = (trap1 - force_ref) * k_eff
 
     # ------------------------------------------------------------------
-    # 7.  Rupture detection
+    # 8.  Rupture detection
     # ------------------------------------------------------------------
     ruptured = _detect_rupture(trap1, phase_arr, seg_id, valid, rupture_threshold_nm)
 
     # ------------------------------------------------------------------
-    # 8.  Build tidy DataFrame
+    # 9.  Build tidy DataFrame
     # ------------------------------------------------------------------
     df = pd.DataFrame(
         {
@@ -368,12 +393,17 @@ def read_puppet(
             "trap1_nm": trap1,
             "trap2_nm": trap2,
             "extension_nm": extension,
+            "extension_nm_corrected": extension_corrected,
             "voltage_v": voltage_v,
             "power_mw": power_mw,
             "valid": valid,
             "segment_id": seg_id,
             "phase": phase_arr,
             "hold_voltage": hold_voltage,
+            "bead1_diameter_nm": np.full(n_rows, bead1_diameter_nm, dtype=float),
+            "bead2_diameter_nm": np.full(n_rows, bead2_diameter_nm, dtype=float),
+            "bead1_radius_nm": np.full(n_rows, bead1_radius_nm, dtype=float),
+            "bead2_radius_nm": np.full(n_rows, bead2_radius_nm, dtype=float),
             "k_eff": k_eff,
             "force_ref_nm": force_ref,
             "force_pn": force_pn,
