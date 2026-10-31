@@ -62,8 +62,9 @@ Output columns
 --------------
 ``frame_idx``, ``time_s``, ``trap1_nm``, ``trap2_nm``, ``extension_nm``,
 ``voltage_v``, ``power_mw``, ``valid``, ``segment_id``, ``phase``,
-``hold_voltage``, ``k_eff``, ``force_ref_nm``, ``force_pn``, ``ruptured``,
-``source``
+``hold_voltage``, ``k_eff``, ``force_ref_nm``, ``force_pn``,
+``source``.  When *detect_rupture=True* is passed to :func:`read_puppet`,
+``ruptured`` is also present.
 """
 
 from __future__ import annotations
@@ -205,6 +206,7 @@ def read_puppet(
     smooth_window: int = 500,
     dv_threshold: float = 1e-4,
     rupture_threshold_nm: float = 500.0,
+    detect_rupture: bool = False,
     source: str | None = None,
 ) -> pd.DataFrame:
     """Load a puppet-mode optical-trap run as a tidy per-frame DataFrame.
@@ -235,7 +237,13 @@ def read_puppet(
         |dV/dt| threshold (V/sample) separating holds from ramps.
     rupture_threshold_nm:
         Minimum single-frame drop in ``trap1_nm`` (nm) during a ``pull_out``
-        segment that is flagged as a rupture.
+        segment that is flagged as a rupture.  Only used when
+        *detect_rupture* is ``True``.
+    detect_rupture:
+        If ``True``, run rupture detection and add a ``ruptured`` column to
+        the output.  Defaults to ``False`` so that loading is free of
+        rupture side-effects; call :func:`_detect_rupture` explicitly when
+        needed.
     source:
         Run identifier stored in the ``source`` column.  Defaults to the
         file stem.
@@ -378,9 +386,10 @@ def read_puppet(
         force_pn = (trap1 - force_ref) * k_eff
 
     # ------------------------------------------------------------------
-    # 8.  Rupture detection
+    # 8.  Rupture detection (opt-in)
     # ------------------------------------------------------------------
-    ruptured = _detect_rupture(trap1, phase_arr, seg_id, valid, rupture_threshold_nm)
+    if detect_rupture:
+        ruptured = _detect_rupture(trap1, phase_arr, seg_id, valid, rupture_threshold_nm)
 
     # ------------------------------------------------------------------
     # 9.  Build tidy DataFrame
@@ -407,7 +416,8 @@ def read_puppet(
             "k_eff": k_eff,
             "force_ref_nm": force_ref,
             "force_pn": force_pn,
-            "ruptured": ruptured,
         }
     )
+    if detect_rupture:
+        df["ruptured"] = ruptured
     return df
