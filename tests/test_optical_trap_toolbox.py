@@ -12,6 +12,7 @@ from optical_trap_toolbox import (
     export_state_report_json,
     infer_experiment_segments,
     load_normalized_trace,
+    read_acquisition_params,
     plot_force_extension,
     plot_power_voltage,
     plot_segment_boundaries,
@@ -80,6 +81,59 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertEqual(trace["voltage_v"].tolist(), [5.0, 6.0, 7.0, 8.0, 9.0])
         self.assertEqual(trace["stiffness_pn_per_nm"].tolist(), [0.3, 0.4, 0.5, 0.6, 0.7])
         self.assertEqual(trace["state_code"].astype(int).tolist(), [21, 21, 24, 24, 27])
+
+    def test_params_parser_supports_new_and_legacy_formats(self):
+        repo_root = Path(__file__).resolve().parents[1]
+
+        tether_params = repo_root / "example_data" / "ParamData" / "tether1_params.dat"
+        osc_params = repo_root / "example_data" / "ParamData" / "tether1_osc_params.dat"
+        puppet_params = repo_root / "example_data" / "ParamData" / "tether1_puppet_params.dat"
+        legacy_params = repo_root / "example_data" / "tether1_1_params.dat"
+
+        tether = read_acquisition_params(tether_params)
+        self.assertEqual(tether["mode"], "tether_formation")
+        self.assertEqual(tether["tether_voltages"], [9.45, 8.4, 6.0, 5.0])
+
+        osc = read_acquisition_params(osc_params)
+        self.assertEqual(osc["mode"], "oscillator")
+        self.assertEqual(osc["oscillator_voltages"], [8.4, 4.0])
+        self.assertEqual(osc["oscillator_waits"], [1.0, 0.1])
+
+        puppet = read_acquisition_params(puppet_params)
+        self.assertEqual(puppet["mode"], "puppet")
+        self.assertEqual(len(puppet["puppet_schedule"]), 5)
+        self.assertEqual(puppet["puppet_schedule"][0]["target_v"], 8.4)
+
+        legacy = read_acquisition_params(legacy_params)
+        self.assertTrue(legacy["legacy"])
+        self.assertEqual(legacy["mode_code"], 0)
+        self.assertEqual(legacy["schedule_rows"], [])
+        self.assertIsNone(legacy["mode"])
+        self.assertNotEqual(legacy["acquisition_mode"], "calibration")
+
+    def test_legacy_zero_params_not_labeled_calibration(self):
+        import shutil
+        import tempfile
+
+        repo_root = Path(__file__).resolve().parents[1]
+        legacy_src = repo_root / "example_data" / "tether1_1_params.dat"
+        with tempfile.TemporaryDirectory() as tmp:
+            # Filename contains a zero; content is the legacy single value 0.
+            dat = Path(tmp) / "run0_10.dat"
+            dat.write_text("0 1 2 3 4 5\n0.1 1 2 3 4 5\n")
+            shutil.copy(legacy_src, Path(tmp) / "run0_10_params.dat")
+            params = read_acquisition_params(Path(tmp) / "run0_10_params.dat")
+            self.assertEqual(params["mode_code"], 0)
+            self.assertTrue(params["legacy"])
+            self.assertIsNone(params["mode"])
+            trace = load_normalized_trace(dat)
+            self.assertTrue(np.all(trace["acquisition_mode"] == "unknown"))
+            self.assertTrue(np.all(trace["params_legacy"]))
+            self.assertTrue(np.all(trace["acquisition_mode_code"] == 0))
+
+        trace = load_normalized_trace(repo_root / "example_data" / "ParamData" / "tether1.dat")
+        self.assertEqual(trace["acquisition_mode"][0], "tether_formation")
+        self.assertTrue(np.all(trace["params_legacy"] == False))
 
     def test_segment_state_runs_ignores_nan_values(self):
         states = np.array([np.nan, 21.0, 21.0, np.nan, 24.0, 24.0, np.nan], dtype=float)
