@@ -108,6 +108,28 @@ class OpticalTrapToolboxTestCase(unittest.TestCase):
         self.assertTrue(legacy["legacy"])
         self.assertEqual(legacy["mode_code"], 0)
         self.assertEqual(legacy["schedule_rows"], [])
+        self.assertIsNone(legacy["mode"])
+        self.assertNotEqual(legacy["acquisition_mode"], "calibration")
+
+    def test_legacy_zero_params_not_labeled_calibration(self):
+        import shutil
+        import tempfile
+
+        repo_root = Path(__file__).resolve().parents[1]
+        legacy_src = repo_root / "example_data" / "tether1_1_params.dat"
+        with tempfile.TemporaryDirectory() as tmp:
+            # Filename contains a zero; content is the legacy single value 0.
+            dat = Path(tmp) / "run0_10.dat"
+            dat.write_text("0 1 2 3 4 5\n0.1 1 2 3 4 5\n")
+            shutil.copy(legacy_src, Path(tmp) / "run0_10_params.dat")
+            params = read_acquisition_params(Path(tmp) / "run0_10_params.dat")
+            self.assertEqual(params["mode_code"], 0)
+            self.assertTrue(params["legacy"])
+            self.assertIsNone(params["mode"])
+            trace = load_normalized_trace(dat)
+            self.assertTrue(np.all(trace["acquisition_mode"] == "unknown"))
+            self.assertTrue(np.all(trace["params_legacy"]))
+            self.assertTrue(np.all(trace["acquisition_mode_code"] == 0))
 
         trace = load_normalized_trace(repo_root / "example_data" / "ParamData" / "tether1.dat")
         self.assertEqual(trace["acquisition_mode"][0], "tether_formation")

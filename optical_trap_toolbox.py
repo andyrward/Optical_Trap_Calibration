@@ -316,7 +316,12 @@ def read_acquisition_params(path: str | Path | None = None) -> dict[str, Any]:
         result["schedule"] = result["puppet_schedule"]
 
     if mode_code == 0:
+        # Legacy single-value files contain ``0``; that is not evidence of a
+        # calibration run, so do not infer a mode. Callers must supply it.
         result["legacy"] = True
+        result["mode"] = None
+        result["mode_name"] = None
+        result["acquisition_mode"] = None
         result["schedule"] = []
         result["schedule_rows"] = []
         result["puppet_schedule"] = []
