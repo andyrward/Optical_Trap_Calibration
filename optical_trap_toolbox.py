@@ -219,15 +219,8 @@ def _legacy_params_result(path: str | Path | None = None) -> dict[str, Any]:
 def find_companion_params_path(data_path: str | Path) -> Path | None:
     """Return the companion ``*_params.dat`` next to a ``.dat`` file if present."""
     path = Path(data_path)
-    stem = path.stem if path.suffix else path.name
-    candidates = [
-        path.with_name(f"{stem}_params.dat"),
-        path.with_name(f"{path.name}_params.dat") if path.suffix else path.with_name(f"{path.name}_params.dat"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    candidate = path.with_name(f"{path.stem if path.suffix else path.name}_params.dat")
+    return candidate if candidate.exists() else None
 
 
 def read_acquisition_params(path: str | Path | None = None) -> dict[str, Any]:
@@ -339,12 +332,6 @@ def read_companion_params(data_path: str | Path) -> dict[str, Any]:
     return read_acquisition_params(params_path)
 
 
-parse_acquisition_params = read_acquisition_params
-parse_params_file = read_acquisition_params
-read_params_file = read_acquisition_params
-load_params_file = read_acquisition_params
-
-
 def load_normalized_trace(
     filepath: str | Path,
     *,
@@ -363,8 +350,9 @@ def load_normalized_trace(
         params_path = find_companion_params_path(filepath)
     if params_path is not None:
         params = read_acquisition_params(params_path)
+        mode_code = params.get("mode_code")
         trace["acquisition_mode"] = np.full(n_rows, params.get("mode") or "unknown", dtype=object)
-        trace["acquisition_mode_code"] = np.full(n_rows, params.get("mode_code"), dtype=float)
+        trace["acquisition_mode_code"] = np.full(n_rows, mode_code if mode_code is not None else np.nan, dtype=float)
         trace["params_path"] = np.full(n_rows, str(params_path), dtype=object)
         trace["params_legacy"] = np.full(n_rows, bool(params.get("legacy", False)), dtype=bool)
     else:

@@ -57,7 +57,6 @@ import pandas as pd
 
 from optical_trap_toolbox import (
     load_normalized_trace,
-    read_companion_params,
     segment_state_runs,
     STATE_LABELS,
 )
@@ -223,7 +222,6 @@ def load_tidy(
     # --- load raw trace -------------------------------------------------------
     trace = load_normalized_trace(path)
     n = trace["time_s"].size
-    params = read_companion_params(path)
 
     # --- build tidy columns --------------------------------------------------
     trap1 = trace.get("position_1_nm", np.full(n, np.nan))
