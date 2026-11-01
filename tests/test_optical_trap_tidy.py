@@ -8,6 +8,7 @@ Covers:
 * Calibration loading (JSON file + CLI flag).
 * Regression tests against the real tether data files in example_data/.
 * Oscillator analyzer on synthetic data.
+* Rupture detection: NaN handling and CSV round-trip regression.
 """
 
 from __future__ import annotations
@@ -868,3 +869,61 @@ class TestPartialCycleForceCorrection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDetectRuptureEventsNaNHandling(unittest.TestCase):
+    """Regression: detect_rupture_events must not crash on CSV-reloaded tidy data.
+
+    When a tidy DataFrame is written to CSV and read back with pd.read_csv,
+    pandas Int64 columns become float64 with float NaN instead of pd.NA.
+    detect_rupture_events must handle both representations without raising.
+    """
+
+    def _make_tether_detection_df(self) -> pd.DataFrame:
+        """Build a minimal tidy frame with one broke pull attempt and some NA rows."""
+        n = 30
+        rng = np.arange(n, dtype=float)
+        force = np.concatenate([
+            np.linspace(0.0, 20.0, 20),  # pull_out rising
+            np.full(10, 1.0),             # force drops after rupture
+        ])
+        phase = (
+            ["pull_out"] * 20
+            + ["pull_out"] * 10
+        )
+        # Include some NA rows (e.g. non-pull_out rows) so CSV reload gives float NaN
+        fe_attempt_vals = [pd.NA] * 5 + [1] * 20 + [pd.NA] * 5
+        fe_attempt = pd.array(fe_attempt_vals, dtype=pd.Int64Dtype())
+        outcome = [None] * 5 + ["broke"] * 20 + [None] * 5
+        return pd.DataFrame({
+            "time_s": rng * 0.001,
+            "force_pn": force,
+            "extension_nm": rng * 10.0,
+            "phase": phase,
+            "fe_attempt": fe_attempt,
+            "outcome": outcome,
+            "valid": True,
+            "mode": "tether_detection",
+        })
+
+    def test_in_memory_int64(self):
+        """detect_rupture_events works with in-memory Int64 fe_attempt."""
+        from optical_trap_tidy import detect_rupture_events
+        df = self._make_tether_detection_df()
+        result = detect_rupture_events(df, threshold_pn=5.0, n_samples=25)
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertGreater(len(result), 0, "Should detect at least one rupture event")
+
+    def test_csv_roundtrip(self):
+        """detect_rupture_events does not crash after CSV round-trip (float NaN)."""
+        from optical_trap_tidy import detect_rupture_events
+        df = self._make_tether_detection_df()
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "tidy.csv"
+            df.to_csv(csv_path, index=False)
+            df_reloaded = pd.read_csv(csv_path)
+        # After CSV reload, fe_attempt is float64 with NaN instead of Int64 with pd.NA
+        self.assertEqual(df_reloaded["fe_attempt"].dtype, float)
+        result = detect_rupture_events(df_reloaded, threshold_pn=5.0, n_samples=25)
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertGreater(len(result), 0, "CSV-reloaded data should still yield rupture events")

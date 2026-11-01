@@ -96,9 +96,12 @@ class TestRealFileLoad(unittest.TestCase):
             "frame_idx", "time_s", "trap1_nm", "trap2_nm",
             "extension_nm", "voltage_v", "power_mw", "valid",
             "segment_id", "phase", "hold_voltage", "force_pn",
-            "ruptured", "source",
+            "source",
         }
         self.assertTrue(required.issubset(self.df.columns), required - set(self.df.columns))
+
+    def test_ruptured_column_absent_by_default(self):
+        self.assertNotIn("ruptured", self.df.columns)
 
     def test_row_count_matches_dat_file(self):
         data = np.loadtxt(str(_PUPPET_DAT))
@@ -425,7 +428,7 @@ class TestRupture(unittest.TestCase):
         from optical_trap_puppet import read_puppet
         with tempfile.TemporaryDirectory() as tmp:
             dat_path = self._make_rupture_dat(Path(tmp))
-            df = read_puppet(dat_path, rupture_threshold_nm=1000.0)
+            df = read_puppet(dat_path, rupture_threshold_nm=1000.0, detect_rupture=True)
         self.assertTrue(df["ruptured"].any(), "Expected a rupture to be detected")
 
     def test_no_rupture_for_real_file(self):
@@ -433,7 +436,7 @@ class TestRupture(unittest.TestCase):
         if not _PUPPET_DAT.exists():
             self.skipTest("Real fixture not found")
         from optical_trap_puppet import read_puppet
-        df = read_puppet(_PUPPET_DAT, rupture_threshold_nm=500.0)
+        df = read_puppet(_PUPPET_DAT, rupture_threshold_nm=500.0, detect_rupture=True)
         self.assertFalse(df["ruptured"].any(), "tether1_puppet.dat should not have a rupture")
 
     def test_rupture_keeps_partial_data(self):
@@ -441,7 +444,7 @@ class TestRupture(unittest.TestCase):
         from optical_trap_puppet import read_puppet
         with tempfile.TemporaryDirectory() as tmp:
             dat_path = self._make_rupture_dat(Path(tmp))
-            df = read_puppet(dat_path, rupture_threshold_nm=1000.0)
+            df = read_puppet(dat_path, rupture_threshold_nm=1000.0, detect_rupture=True)
         # The 60-sample low-voltage hold after the rupture should still be present
         ruptured_rows = df[df["ruptured"]]
         self.assertGreater(len(ruptured_rows), 0, "Post-rupture rows must be kept")
