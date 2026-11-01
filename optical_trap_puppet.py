@@ -242,8 +242,7 @@ def read_puppet(
     detect_rupture:
         If ``True``, run rupture detection and add a ``ruptured`` column to
         the output.  Defaults to ``False`` so that loading is free of
-        rupture side-effects; call :func:`_detect_rupture` explicitly when
-        needed.
+        rupture side-effects; set ``detect_rupture=True`` when needed.
     source:
         Run identifier stored in the ``source`` column.  Defaults to the
         file stem.
