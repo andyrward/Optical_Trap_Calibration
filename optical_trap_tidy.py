@@ -1796,23 +1796,23 @@ def detect_rupture_events(
     valid_col = df["valid"].to_numpy(dtype=bool) if "valid" in df.columns else np.ones(len(df), dtype=bool)
 
     unique_attempts = sorted(
-        set(int(a) for a in fe_col if a is not pd.NA and a is not None)
+        set(int(a) for a in fe_col if not pd.isna(a))
     )
     for attempt in unique_attempts:
         attempt_mask = np.array(
-            [a is not pd.NA and a is not None and int(a) == attempt for a in fe_col],
+            [not pd.isna(a) and int(a) == attempt for a in fe_col],
             dtype=bool,
         )
         # Only process broke attempts
         attempt_outcomes = outcome_col[attempt_mask]
         if not any(
-            o is not None and o is not pd.NA and o == "broke"
+            not pd.isna(o) and o == "broke"
             for o in attempt_outcomes
         ):
             continue
 
         phase_mask = np.array(
-            [p == "pull_out" if p is not pd.NA and p is not None else False for p in phase_col],
+            [p == "pull_out" if not pd.isna(p) else False for p in phase_col],
             dtype=bool,
         )
         pull_mask = attempt_mask & phase_mask & valid_col
@@ -1853,25 +1853,23 @@ def detect_rupture_events(
 
 def extract_attempt_summary(
     df: pd.DataFrame,
-    *,
-    rupture_threshold_pn: float = 5.0,
-    rupture_n_samples: int = 100,
 ) -> pd.DataFrame:
     """Return a per-attempt summary for tether-detection runs.
+
+    Rupture detection is **not** performed here; call
+    :func:`detect_rupture_events` separately and join on ``fe_attempt`` if
+    rupture columns are needed.
 
     Parameters
     ----------
     df:
         Tidy DataFrame (tether-detection mode, after force computation and
         outcome labelling).
-    rupture_threshold_pn, rupture_n_samples:
-        Forwarded to :func:`detect_rupture_events`.
 
     Returns
     -------
     DataFrame with one row per pull attempt.  Columns: ``fe_attempt``,
     ``outcome``, ``peak_force_pn``, ``max_extension_nm``,
-    ``rupture_time_s``, ``rupture_force_pn``, ``rupture_extension_nm``,
     ``source``, ``tether_id``.
     """
     td_mask = df["mode"].eq("tether_detection")
@@ -1879,13 +1877,6 @@ def extract_attempt_summary(
     pull_df = td_df[td_df["phase"].fillna(False).eq("pull_out")]
     if len(pull_df) == 0:
         return pd.DataFrame()
-
-    ruptures = detect_rupture_events(
-        td_df,
-        threshold_pn=rupture_threshold_pn,
-        n_samples=rupture_n_samples,
-    )
-    rup_by_attempt = ruptures.set_index("fe_attempt") if len(ruptures) else pd.DataFrame()
 
     source = df["source"].iloc[0] if "source" in df.columns else ""
     tid = df["tether_id"].iloc[0] if "tether_id" in df.columns else ""
@@ -1902,17 +1893,9 @@ def extract_attempt_summary(
             "outcome": outcome,
             "peak_force_pn": peak_force,
             "max_extension_nm": max_ext,
-            "rupture_time_s": np.nan,
-            "rupture_force_pn": np.nan,
-            "rupture_extension_nm": np.nan,
             "source": source,
             "tether_id": tid,
         }
-        if len(rup_by_attempt) and attempt_val in rup_by_attempt.index:
-            rrow = rup_by_attempt.loc[attempt_val]
-            row["rupture_time_s"] = float(rrow["rupture_time_s"])
-            row["rupture_force_pn"] = float(rrow["rupture_force_pn"])
-            row["rupture_extension_nm"] = float(rrow["rupture_extension_nm"])
         rows.append(row)
 
     return pd.DataFrame(rows)
