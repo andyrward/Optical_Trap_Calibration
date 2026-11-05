@@ -232,6 +232,29 @@ This app was designed to be a legitimate portable replacement for the MATLAB wor
 
 ## Analysis CLI tools (`optical_trap_tidy.py` and `optical_trap_oscillator.py`)
 
+## Post-tidy rupture and Δ-extension analysis (`optical_trap_analysis.py`)
+
+Rupture and kinetics analysis is available as explicit post-processing on tidy
+tables (oscillator or puppet), without side effects in loaders.
+
+```python
+from optical_trap_analysis import (
+    detect_dynamic_rupture_events,
+    detect_static_hold_rupture_events,
+    summarize_dynamic_delta_extension,
+    add_same_force_extension,
+    average_pull_in_trace,
+)
+```
+
+Typical flow:
+1. Build tidy frames (`load_tidy(...)` + cycle/force labelling, or `read_puppet(...)`).
+2. Dynamic regime: `detect_dynamic_rupture_events(...)` for rupture force + loading rate.
+3. Dynamic Δx bins: `summarize_dynamic_delta_extension(...)` for pull_out − pull_in per force bin.
+4. Static regime: `detect_static_hold_rupture_events(...)` for hold rupture lifetime/force.
+5. Same-force comparison: `add_same_force_extension(...)` to interpolate extension on later pull-in at rupture force.
+6. Optional pull-in stacking: `average_pull_in_trace(...)`.
+
 ### `--mode` (required)
 
 Both CLIs require an explicit `--mode` flag.  No default is assumed:
