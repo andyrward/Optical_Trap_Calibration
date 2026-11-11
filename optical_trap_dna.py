@@ -140,33 +140,48 @@ def _extensible_wlc_extension_from_force(
     kbt_pn_nm: float,
     stretch_modulus_pn: float,
 ) -> np.ndarray:
-    """Approximate extensible WLC extension with a large-force limit x -> L.
+    """Return the extensible WLC extension using the additive stretch term.
 
-    The asymptotic form is intentionally simple: it keeps the relevant stress
-    response and avoids unphysical negative extension at low force.
+    The Odijk high-force limit is x = L * (1 - 0.5 * sqrt(kBT / (F * lp)) + F/S),
+    so the linear strain correction is added to the inextensible WLC extension
+    rather than multiplying by a factor of (1 + F/S).
     """
     force_arr = np.asarray(np.atleast_1d(force_pn), dtype=float)
     L = float(contour_length_nm)
     lp = float(persistence_length_nm)
     S = float(stretch_modulus_pn)
     wlc_term = np.asarray(_wlc_extension_from_force(force_arr, L, lp, kbt_pn_nm), dtype=float)
-    strain = np.clip(force_arr / S, 0.0, None)
-    result = np.maximum(wlc_term * (1.0 + strain), 0.0)
+    result = np.maximum(wlc_term + L * np.clip(force_arr / S, 0.0, None), 0.0)
     return result[0] if np.isscalar(force_pn) else result
 
 
-def _fjc_extension_from_force(force_pn: np.ndarray, contour_length_nm: float, persistence_length_nm: float, kbt_pn_nm: float) -> np.ndarray:
-    """Simple FJC-like extension with the correct low-force limit.
+def _langevin(u: np.ndarray | float) -> np.ndarray | float:
+    """Return Langevin(u) = coth(u) - 1/u with a stable low-u expansion."""
+    u_arr = np.asarray(u, dtype=float)
+    result = np.empty_like(u_arr, dtype=float)
+    small = np.abs(u_arr) < 1e-6
+    result[small] = u_arr[small] / 3.0
+    valid = ~small
+    if np.any(valid):
+        u_valid = np.asarray(u_arr[valid], dtype=float)
+        e2 = np.exp(-2.0 * u_valid)
+        coth = (1.0 + e2) / (1.0 - e2)
+        result[valid] = coth - 1.0 / u_valid
+    return result[()] if np.ndim(u_arr) == 0 else result
 
-    A freely-jointed chain is approximately linear at low force and approaches
-    the contour length monotonically at high force.
+
+def _fjc_extension_from_force(force_pn: np.ndarray, contour_length_nm: float, persistence_length_nm: float, kbt_pn_nm: float) -> np.ndarray:
+    """Return x(F) for a 3D freely-jointed chain.
+
+    The standard FJC relation is x = L * (coth(u) - 1/u) with u = F * b / kBT,
+    where the Kuhn length is b = 2 * lp for a persistence-length model.
     """
     force_arr = np.asarray(np.atleast_1d(force_pn), dtype=float)
     L = float(contour_length_nm)
     lp = float(persistence_length_nm)
-    scale = max(kbt_pn_nm / max(lp, 1e-12), 1e-12)
-    t = np.clip(force_arr / scale, 0.0, None)
-    result = L * np.tanh(t)
+    kuhn_length_nm = max(2.0 * lp, 1e-12)
+    u = np.clip(force_arr * kuhn_length_nm / max(kbt_pn_nm, 1e-12), 0.0, None)
+    result = L * _langevin(u)
     return result[0] if np.isscalar(force_pn) else result
 
 
@@ -177,12 +192,13 @@ def _extensible_fjc_extension_from_force(
     kbt_pn_nm: float,
     stretch_modulus_pn: float,
 ) -> np.ndarray:
-    """Extensible FJC: chain extension saturates to L with a modest strain term."""
+    """Extensible FJC: add the linear elastic strain to the Langevin term."""
     force_arr = np.asarray(np.atleast_1d(force_pn), dtype=float)
     L = float(contour_length_nm)
-    base = _fjc_extension_from_force(force_arr, L, persistence_length_nm, kbt_pn_nm)
-    strain = np.clip(force_arr / max(stretch_modulus_pn, 1e-12), 0.0, None)
-    result = np.maximum(base * (1.0 + strain), 0.0)
+    lp = float(persistence_length_nm)
+    kuhn_length_nm = max(2.0 * lp, 1e-12)
+    u = np.clip(force_arr * kuhn_length_nm / max(kbt_pn_nm, 1e-12), 0.0, None)
+    result = L * (np.asarray(_langevin(u), dtype=float) + np.clip(force_arr / max(stretch_modulus_pn, 1e-12), 0.0, None))
     return result[0] if np.isscalar(force_pn) else result
 
 
