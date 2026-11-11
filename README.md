@@ -91,6 +91,64 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+## Running the tests
+
+Install dependencies first (including `pytest`, now listed in
+`requirements.txt`), then run tests from the repository root:
+
+```bash
+python -m pytest tests
+```
+
+or with the built-in unittest runner:
+
+```bash
+python -m unittest discover tests
+```
+
+### Test module coverage map
+
+| Test module | Primary code/module covered |
+|---|---|
+| `tests/test_edge_correction.py` | `optical_trap_edge_correction.py` (plus edge/mode integration paths in tidy/CLI helpers) |
+| `tests/test_optical_trap_analysis.py` | `optical_trap_analysis.py` |
+| `tests/test_optical_trap_calibration.py` | `optical_trap_calibration.py` |
+| `tests/test_optical_trap_dna.py` | `optical_trap_dna.py` |
+| `tests/test_optical_trap_puppet.py` | `optical_trap_puppet.py` |
+| `tests/test_optical_trap_tethers.py` | `optical_trap_tethers.py` |
+| `tests/test_optical_trap_tidy.py` | `optical_trap_tidy.py` and `optical_trap_oscillator.py` |
+| `tests/test_optical_trap_toolbox.py` | `optical_trap_toolbox.py` |
+
+At the time of writing this suite contains 164 unittest-style tests across
+these eight modules.
+
+### Real-data fixtures and skipped tests
+
+Some tests intentionally skip when large/real fixtures are unavailable, so a
+"green" run can still miss data-backed checks.
+
+- `tests/test_optical_trap_tidy.py`, `tests/test_optical_trap_tethers.py`, and
+  `tests/test_optical_trap_puppet.py` include skips for missing real fixture
+  files under `example_data/`.
+- `tests/test_optical_trap_toolbox.py` includes skips for missing files under
+  `Matlab_Files/`.
+
+To avoid silent skips, make sure those folders are present in your working tree
+before running tests. You can quickly verify:
+
+```bash
+ls example_data Matlab_Files
+```
+
+Then check the pytest summary and confirm `skipped=0` (or only expected skips)
+for the run.
+
+### CI note
+
+Current GitHub Actions workflows build executables but do not yet run the test
+suite. A dedicated pytest workflow is planned; once it lands, use it as the
+default gate for pull requests.
+
 ## Run the GUI app
 
 ```bash
