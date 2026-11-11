@@ -41,7 +41,7 @@ def _resolve_kbt(temperature_k: float | None = None, kbt_pn_nm: float | None = N
     if kbt_pn_nm is not None:
         return float(kbt_pn_nm)
     if temperature_k is not None:
-        return 1.380649e-23 * temperature_k / 1.602176634e-19  # J to pN·nm
+        return 1.380649e-23 * temperature_k / 1e-21  # J to pN·nm
     return _DEFAULT_KBT_PN_NM
 
 
@@ -151,7 +151,7 @@ def _extensible_wlc_extension_from_force(
     S = float(stretch_modulus_pn)
     wlc_term = np.asarray(_wlc_extension_from_force(force_arr, L, lp, kbt_pn_nm), dtype=float)
     strain = np.clip(force_arr / S, 0.0, None)
-    result = np.clip(wlc_term * (1.0 + strain), 0.0, L)
+    result = np.maximum(wlc_term * (1.0 + strain), 0.0)
     return result[0] if np.isscalar(force_pn) else result
 
 
@@ -182,7 +182,7 @@ def _extensible_fjc_extension_from_force(
     L = float(contour_length_nm)
     base = _fjc_extension_from_force(force_arr, L, persistence_length_nm, kbt_pn_nm)
     strain = np.clip(force_arr / max(stretch_modulus_pn, 1e-12), 0.0, None)
-    result = np.clip(base * (1.0 + strain), 0.0, L)
+    result = np.maximum(base * (1.0 + strain), 0.0)
     return result[0] if np.isscalar(force_pn) else result
 
 
@@ -250,7 +250,7 @@ def _force_from_extension_core(
         if not np.isfinite(extension) or extension <= 0.0:
             result[idx] = 0.0
             continue
-        if extension >= contour_length_nm:
+        if extension >= contour_length_nm and model_name not in {"extensible_wlc", "extensible_fjc"}:
             result[idx] = np.inf
             continue
 
@@ -596,13 +596,11 @@ def target_curve(
     diagnostic, together with the total extension of the resulting construct.
     """
     force_arr = np.asarray(force_pn, dtype=float)
-    ds_length = _coerce_contour_length(ds_contour_length_nm, ds_params.get("rise_per_unit_nm", 1.0))
+    ds_series = zero_target_curve(force_arr, ds_contour_length_nm, ds_params)
     target_extension = np.empty_like(force_arr, dtype=float)
     target_force = np.empty_like(force_arr, dtype=float)
     loop_force = np.empty_like(force_arr, dtype=float)
     parallel_extension = np.empty_like(force_arr, dtype=float)
-    ds_series = zero_target_curve(force_arr, ds_length, ds_params)
-
     for idx, total_force in enumerate(force_arr):
         if not np.isfinite(total_force) or total_force <= 0.0:
             target_force[idx] = 0.0
