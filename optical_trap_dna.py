@@ -192,13 +192,20 @@ def _extensible_fjc_extension_from_force(
     kbt_pn_nm: float,
     stretch_modulus_pn: float,
 ) -> np.ndarray:
-    """Extensible FJC: add the linear elastic strain to the Langevin term."""
+    """Return the extensible FJC from Smith, Cui & Bustamante (Science 271, 795, 1996).
+
+    The multiplicative form is
+        x = L_c * Langevin(F * b / kBT) * (1 + F / S),
+    with b = 2 * lp for a persistence-length-based model.  This preserves the
+    standard 3D FJC response while applying the finite stretch modulus as a
+    multiplicative elastic correction.
+    """
     force_arr = np.asarray(np.atleast_1d(force_pn), dtype=float)
     L = float(contour_length_nm)
     lp = float(persistence_length_nm)
     kuhn_length_nm = max(2.0 * lp, 1e-12)
     u = np.clip(force_arr * kuhn_length_nm / max(kbt_pn_nm, 1e-12), 0.0, None)
-    result = L * (np.asarray(_langevin(u), dtype=float) + np.clip(force_arr / max(stretch_modulus_pn, 1e-12), 0.0, None))
+    result = L * np.asarray(_langevin(u), dtype=float) * (1.0 + np.clip(force_arr / max(stretch_modulus_pn, 1e-12), 0.0, None))
     return result[0] if np.isscalar(force_pn) else result
 
 

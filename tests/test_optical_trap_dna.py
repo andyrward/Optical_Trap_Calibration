@@ -60,6 +60,21 @@ class DNAForceExtensionTests(unittest.TestCase):
         x_ext = single_polymer_extension(force, L, lp, 1200.0, model="extensible_fjc")
         self.assertTrue(np.all(np.isfinite(x_ext)))
 
+    def test_extensible_fjc_uses_multiplicative_smith_form(self):
+        L = 1000.0
+        lp = 0.75
+        S = 50.0
+        force = np.array([0.1, 1.0, 5.0, 20.0, 40.0], dtype=float)
+        b = 2.0 * lp
+        kbt = 4.114
+        expected = L * _langevin(force * b / kbt) * (1.0 + force / S)
+        x_ext = single_polymer_extension(force, L, lp, S, model="extensible_fjc")
+        self.assertTrue(np.allclose(x_ext, expected, rtol=1e-9, atol=1e-12))
+
+        additive = L * (_langevin(force * b / kbt) + force / S)
+        gap = np.abs(additive - expected)
+        self.assertGreater(float(np.max(gap)), 3.0)
+
     def test_temperature_and_base_count_inputs(self):
         self.assertAlmostEqual(_resolve_kbt(temperature_k=298.15), 4.114, delta=0.01)
         x_default = single_polymer_extension(np.array([1.0]), 1000.0, 50.0, 1200.0, model="wlc")
