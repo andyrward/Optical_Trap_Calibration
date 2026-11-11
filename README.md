@@ -232,7 +232,7 @@ This app was designed to be a legitimate portable replacement for the MATLAB wor
 
 ## Analysis CLI tools (`optical_trap_tidy.py` and `optical_trap_oscillator.py`)
 
-## Post-tidy rupture and Δ-extension analysis (`optical_trap_analysis.py`)
+### Post-tidy rupture and Δ-extension analysis (`optical_trap_analysis.py`)
 
 Rupture and kinetics analysis is available as explicit post-processing on tidy
 tables (oscillator or puppet), without side effects in loaders.
