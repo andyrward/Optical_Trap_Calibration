@@ -7,3 +7,7 @@ Figure 1 shows the three curves the toolkit computes, drawn as springs. The 0T c
 ![DNA FE toolkit model schematic](DNA_FE_toolkit_model_schematic.png)
 
 **Figure 1.** Spring schematic of the DNA force-extension toolkit models from issue #32: the 0T curve (dsDNA region alone), the full-length curve (dsDNA region in series with the loop), and the Target curve (dsDNA region in series with the loop and target in parallel), with the delta-extension and distance equations below. A vector version is in `DNA_FE_toolkit_model_schematic.svg`.
+
+## How to cite
+
+When you reference the DNA force-extension model, please cite Figure 1 in `docs/dna_fe_toolkit/` (`DNA_FE_toolkit_model_schematic.png` or `.svg`) and [issue #32](https://github.com/andyrward/Optical_Trap_Calibration/issues/32).
