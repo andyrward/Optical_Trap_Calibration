@@ -226,6 +226,46 @@ Sample generated reports are included in the repository under `sample_reports/`:
 
 These show the output format for both an example trace with no detected discrete states and a MATLAB sample trace with a single detected run.
 
+## DNA force-extension toolkit
+
+The repository also includes `optical_trap_dna.py`, a lightweight toolkit for single-polymer force-extension curves and looped DNA-caliper constructs. It exposes the public functions below and supports the model keywords `wlc`, `extensible_wlc`, `fjc`, and `extensible_fjc`:
+
+- `single_polymer_extension` / `single_polymer_force`
+- `full_length_curve`
+- `zero_target_curve`
+- `target_curve`
+- `delta_extension_zero_target`
+- `delta_extension_target`
+- `distance_estimate`
+- `compare_delta_extension`
+
+This toolkit is documented in:
+
+- `docs/dna_fe_toolkit/README.md` — quick-start examples and API notes
+- `docs/dna_fe_toolkit/MODEL_GUIDE.md` — equations, model choices, and parameter background
+
+Example usage:
+
+```python
+import numpy as np
+from optical_trap_dna import single_polymer_extension, full_length_curve, target_curve
+
+force = np.linspace(0.1, 20.0, 200)
+
+ds_params = {
+    "model": "wlc",
+    "persistence_length_nm": 50.0,
+    "stretch_modulus_pn": 1200.0,
+    "rise_per_unit_nm": 0.34,
+}
+
+x_ds = single_polymer_extension(force, 13250.0, 50.0, 1200.0, model="wlc", rise_per_unit_nm=0.34)
+full = full_length_curve(force, 13250.0, 300.0, ds_params, ds_params)
+result = target_curve(force, 13250.0, 300.0, 150.0, ds_params, ds_params, ds_params)
+```
+
+For bp or nt inputs, pass the appropriate `rise_per_unit_nm` value (for example `0.34` for dsDNA bases or `0.63` for ssDNA nucleotides).
+
 ## Packaging notes
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
