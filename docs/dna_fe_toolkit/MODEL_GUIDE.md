@@ -1,6 +1,6 @@
 # DNA force-extension toolkit: model guide
 
-This note is a write-up guide for the DNA force-extension toolkit proposed in [issue #32](https://github.com/andyrward/Optical_Trap_Calibration/issues/32) of the `andyrward/Optical_Trap_Calibration` repository. The Python module `optical_trap_dna.py` is under review in [pull request #33](https://github.com/andyrward/Optical_Trap_Calibration/pull/33) on the branch `copilot/add-dna-force-extension-toolkit` and has not been merged. The module accepts the model keywords `wlc`, `extensible_wlc`, `fjc`, and `extensible_fjc`. The four force-extension equations used by the toolkit are collected in Figure 1, together with model names, citations, and a symbol key. The Kuhn length is $b = 2p$, and $k_BT = 4.11$ pN·nm at 298 K.
+This note is a write-up guide for the DNA force-extension toolkit in `optical_trap_dna.py`, which is part of the `andyrward/Optical_Trap_Calibration` repository. The module accepts the model keywords `wlc`, `extensible_wlc`, `fjc`, and `extensible_fjc`. The four force-extension equations used by the toolkit are collected in Figure 1, together with model names, citations, and a symbol key. The Kuhn length is $b = 2p$, and $k_BT = 4.11$ pN·nm at 298 K. For a quick-start usage guide, see [`README.md`](README.md) in this folder and the top-level [`README.md`](../../README.md).
 
 ![Four DNA force-extension model equations](DNA_FE_model_equations.png)
 
@@ -20,11 +20,11 @@ The extensible freely jointed chain (eFJC; keyword `extensible_fjc`) is the usua
 
 ## Construct curves
 
-The toolkit builds three construct curves from these segment models, as shown in Figure 2. The 0T curve is the dsDNA region alone. The full-length curve is the dsDNA region in series with the loop region. The Target curve is the dsDNA region in series with a block in which the loop and the target sit in parallel, so they share one extension and the force splits between them. Segments in series carry the same force and their extensions add. The delta extensions are $\Delta_{0T} = x_{\mathrm{full}} - x_{0T}$ and $\Delta_{\mathrm{target}} = x_{\mathrm{full}} - x_{\mathrm{target}}$, and the distance estimate is $\Delta_{0T} - \Delta_{\mathrm{target}} = x_{\mathrm{target}} - x_{0T}$.
+The toolkit builds three construct curves from these segment models, as shown in Figure 2. The 0T curve is the dsDNA region alone. The full-length curve is the dsDNA region in series with the loop region. The target curve is the dsDNA region in series with a block in which the loop and the target sit in parallel, so they share one extension and the force splits between them. Segments in series carry the same force and their extensions add. The delta extensions are $\Delta_{0T} = x_{\mathrm{full}} - x_{0T}$ and $\Delta_{\mathrm{target}} = x_{\mathrm{full}} - x_{\mathrm{target}}$, and the distance estimate is $\Delta_{0T} - \Delta_{\mathrm{target}} = x_{\mathrm{target}} - x_{0T}$.
 
 ![Spring schematic of the DNA force-extension toolkit models](DNA_FE_toolkit_model_schematic.png)
 
-*Figure 2. Spring schematic of the DNA force-extension toolkit models from issue #32: the 0T curve (dsDNA region alone), the full-length curve (dsDNA region in series with the loop), and the Target curve (dsDNA region in series with the loop and target in parallel), with the delta-extension and distance equations below.*
+*Figure 2. Spring schematic of the DNA force-extension toolkit models: the 0T curve (dsDNA region alone), the full-length curve (dsDNA region in series with the loop), and the target curve (dsDNA region in series with the loop and target in parallel), with the delta-extension and distance equations below.*
 
 The loop and target segments in a DNA-caliper construct, and short tether arms, can be short enough that the apparent persistence length drops. The 13,250 bp full-length dsDNA construct is long enough that a 50 nm persistence length remains reasonable, as discussed below.
 
@@ -81,7 +81,7 @@ or equivalently $L \to L(1+F/S)$. That is how Camunas-Soler, Ribezzi-Crivellari,
 
 The two forms are not mathematically equivalent. They differ by $(L_c - z)\,F/S$, which is small near full extension. For dsDNA with $L_c = 4821$ nm, $p = 50$ nm, and $S = 1200$ pN, that difference is 1.30 nm at 5 pN and 3.65 nm at 40 pN (0.076% of $L_c$). It grows further toward overstretching (4.65 nm at 65 pN). Figure 1 shows the additive (inverted Wang) eWLC and the multiplicative Smith eFJC.
 
-As of commit `96b8e2e` on pull request #33, the code used an additive eWLC, $z_{\mathrm{WLC}}(F) + L_c F/S$, and an additive eFJC, $L_c\,\mathcal{L}(Fb/k_BT) + F/S$. A later commit on the same branch, `26f6b30`, switches the eFJC to the multiplicative Smith form and adds a test against that formula. The eWLC remains additive. Which eWLC stretch term the toolkit should keep is **pending the stretch-term investigation**. Pull request #33 is still open and has not been merged.
+The implementation in `optical_trap_dna.py` uses the additive eWLC form, $z_{\mathrm{WLC}}(F) + L_c F/S$, and the multiplicative Smith eFJC form, $L_c\,\mathcal{L}(Fb/k_BT)\,(1 + F/S)$. The same mathematical form is used throughout the toolkit and is summarized in the model equations above.
 
 ## References
 
