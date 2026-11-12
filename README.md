@@ -23,6 +23,43 @@ The Python port mirrors the original MATLAB physics and defaults, including:
 - default fit exclusion: frequencies below 20 Hz, and between 90 and 120 Hz
 - aliased PSD model with the `sinc²` exposure term and harmonic sum from `j=-40` to `40`
 
+## Module index
+
+| Module / folder | Purpose | Main entry point | Docs |
+|---|---|---|---|
+| `optical_trap_calibration.py` | Tkinter GUI + CLI calibration with aliased PSD fit. | `python optical_trap_calibration.py --file ...` or `calibrate_file(...)` | This README |
+| `filtpsdaliased.py` | Aliased Lorentzian PSD helper used by calibration. | `filtpsdaliased(...)` | Source docstring |
+| `optical_trap_toolbox.py` | Core loading/wrangling helpers and state segmentation. | `load_normalized_trace(...)`, `segment_state_runs(...)` | [Optical Trap Toolbox](#optical-trap-toolbox-wrangling-foundation) |
+| `optical_trap_state_report.py` | CLI summary of contiguous state runs. | `python optical_trap_state_report.py --file ...` | [State report utility](#state-report-utility) |
+| `optical_trap_tidy.py` | Tidy per-sample builder with routine detection and analysis-oriented outputs. | `python optical_trap_tidy.py ... --mode ...` | [Analysis CLI tools](#analysis-cli-tools-optical_trap_tidypy-and-optical_trap_oscillatorpy) |
+| `optical_trap_oscillator.py` | Oscillator-focused analyzer for tidy traces. | `python optical_trap_oscillator.py ...` | [Analysis CLI tools](#analysis-cli-tools-optical_trap_tidypy-and-optical_trap_oscillatorpy) |
+| `optical_trap_edge_correction.py` | Edge-tracking correction used by tidy/oscillator workflows. | `correct_edge_tracking(...)` or `--edge-correction` in CLIs | [Edge-tracking correction](#edge-tracking-correction---edge-correction) |
+| `optical_trap_tethers.py` | Tether ID registry, linking, and provenance helpers. | `register_or_reuse_tether(...)` and related helpers | [Tether ID and provenance flags](#tether-id-and-provenance-flags) |
+| `optical_trap_puppet.py` | Puppet-mode reader that returns phase-segmented tidy frames. | `read_puppet(...)` | [Post-tidy rupture and Δ-extension analysis](#post-tidy-rupture-and-Δ-extension-analysis-optical_trap_analysispy) |
+| `optical_trap_analysis.py` | Post-tidy rupture / Δ-extension analysis functions. | `detect_dynamic_rupture_events(...)` and related helpers | [Post-tidy rupture and Δ-extension analysis](#post-tidy-rupture-and-Δ-extension-analysis-optical_trap_analysispy) |
+| `optical_trap_dna.py` | DNA force-extension models and distance-estimate helpers. | Module functions (no CLI) | [`docs/dna_fe_toolkit/`](docs/dna_fe_toolkit/README.md) and [`MODEL_GUIDE.md`](docs/dna_fe_toolkit/MODEL_GUIDE.md) |
+| `web_app.py` + `templates/index.html` | FastAPI/Jinja web view for calibration in browser preview. | `docker compose -f docker-compose.base44.yml up -d --build` | `AGENTS.md` |
+| `build_executable.py` | PyInstaller helper for local standalone builds. | `python build_executable.py` | [Local standalone executable build](#local-standalone-executable-build) |
+| `Matlab_Files/` | Original MATLAB scripts and sample traces from the calibration/wrangling workflow. | MATLAB scripts (`*.m`) | [MATLAB sources and example files](#matlab-sources-and-example-files) |
+| `DualTrapDataAnalysis_Eric/` | Original MATLAB dual-trap analysis codebase (legacy reference). | MATLAB scripts (`*.m`) | [MATLAB sources and example files](#matlab-sources-and-example-files) |
+
+## Pipeline walkthrough
+
+```text
+raw trace (.dat + _Voltage.dat)
+  -> calibration (`optical_trap_calibration.py`) => k (pN/nm, pN/nm/mW)
+  -> tidy extraction (`optical_trap_tidy.py --mode tether-detection|oscillator`
+     or `optical_trap_puppet.read_puppet`)
+       + optional edge correction (`--edge-correction`)
+       + optional tether IDs / provenance (`--date/--bead/--target/--registry`)
+  -> post-tidy analysis (`optical_trap_analysis.py`)
+       rupture force/lifetime + dynamic delta-extension summaries
+  -> DNA model comparison (`optical_trap_dna.py` + `docs/dna_fe_toolkit/`)
+       model deltas and distance estimate
+```
+
+Image-based particle tracking (video/microscopy to position traces) is outside this repository. Use the separate particle-tracking repository used in your workflow, then feed the resulting `.dat` traces into this repository.
+
 ## File formats
 
 ### Position data file
@@ -158,6 +195,15 @@ The repository includes an example dataset at:
 - `example_data/example_trap_data.dat`
 - `example_data/example_trap_data_Voltage.dat`
 
+For multi-step analysis examples, use files in `example_data/` such as:
+
+- `example_data/tether1_1.dat`
+- `example_data/tether1_2.dat`
+- `example_data/tether1_final.dat`
+- `example_data/tether1_puppet.dat`
+
+Note: root-level `tether1_1*.dat` files are legacy duplicates; prefer the copies in `example_data/`.
+
 You can test the app with:
 
 ```bash
@@ -189,8 +235,8 @@ It focuses on reusable data loading and segmentation before deeper physics analy
 The inferred labels are based on existing MATLAB code paths and are intentionally conservative:
 
 - `21` → `tether_attempt_or_contact` (inferred from DualTrap workflow context)
-- `24` → `reference_pull` (from `StateFinder(24, ...)` usage in `TetherDataLoad.m`)
-- `27` → `force_extension` (from FE extraction in `TetherDataLoad.m`)
+- `24` → `approach`
+- `27` → `measure_reference`
 - `31` → `force_extension_subtether` (paired with FE logic in `TetherDataLoad.m`)
 - `3` / `4` → oscillator mode regions (from `segment_regions.m`)
 
@@ -232,6 +278,12 @@ This app was designed to be a legitimate portable replacement for the MATLAB wor
 
 ## Analysis CLI tools (`optical_trap_tidy.py` and `optical_trap_oscillator.py`)
 
+### MATLAB sources and example files
+
+- `Matlab_Files/` contains original MATLAB scripts plus historical sample traces.
+- `DualTrapDataAnalysis_Eric/` contains the legacy dual-trap MATLAB analysis code used as a physics/workflow reference for this Python port.
+- For reproducible Python examples in this repo, prefer `example_data/` files over root-level legacy duplicates.
+
 ### Post-tidy rupture and Δ-extension analysis (`optical_trap_analysis.py`)
 
 Rupture and kinetics analysis is available as explicit post-processing on tidy
@@ -255,9 +307,9 @@ Typical flow:
 5. Same-force comparison: `add_same_force_extension(...)` to interpolate extension on later pull-in at rupture force.
 6. Optional pull-in stacking: `average_pull_in_trace(...)`.
 
-### `--mode` (required)
+### `--mode` (required for `optical_trap_tidy.py`)
 
-Both CLIs require an explicit `--mode` flag.  No default is assumed:
+`optical_trap_tidy.py` requires an explicit `--mode` flag. No default is assumed:
 
 ```bash
 python optical_trap_tidy.py run.dat --mode oscillator
@@ -270,6 +322,8 @@ python optical_trap_tidy.py run.dat --mode tether-detection
   than 3 or 4 appears inside an oscillator segment it is flagged and its time
   is printed.
 - `tether-detection` – expects states 23–27 and 29.
+
+`optical_trap_oscillator.py` is already oscillator-specific and therefore does **not** take a `--mode` flag.
 
 ### Folder input
 
@@ -328,7 +382,7 @@ Pass a JSON or YAML file with `--cal-file`:
 
 ```json
 {
-    "k_per_mw": 7.95e-5
+    "k_trap1_pn_per_nm_per_mw": 7.95e-5
 }
 ```
 
@@ -338,7 +392,8 @@ Or supply the value directly:
 python optical_trap_tidy.py run.dat --mode oscillator --k-per-mw 7.95e-5
 ```
 
-`k_per_mw` is the trap-1 stiffness in pN/nm/mW.  Do **not** hard-code the
+`k_trap1_pn_per_nm_per_mw` is the trap-1 stiffness in pN/nm/mW. Optional
+`k_trap2_pn_per_nm_per_mw` can also be provided. Do **not** hard-code the
 value 6.94e-5 from the test fixture; use the value from a recent calibration
 fit (≈ 7.95e-5 based on a re-fit of the instrument data).
 
