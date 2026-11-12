@@ -316,6 +316,113 @@ For bp or nt inputs, pass the appropriate `rise_per_unit_nm` value (for example 
 
 This app was designed to be a legitimate portable replacement for the MATLAB workflow and to keep the same model-based fitting logic, including the aliased Lorentzian correction and finite exposure-time term.
 
+## Puppet mode (`read_puppet`)
+
+Puppet runs are voltage-programmed hold/ramp cycles. In companion
+`*_params.dat`, the first non-empty row mode code `3` indicates puppet mode.
+`read_acquisition_params(...)` can parse that metadata (including schedule rows),
+while `read_puppet(...)` derives per-frame hold/pull phases from the actual
+voltage trace.
+
+### Minimal example (example fixture)
+
+Files in this repository:
+
+- `example_data/tether1_puppet.dat`
+- `example_data/tether1_puppet_Voltage.dat`
+- `example_data/tether1_puppet_params.dat`
+
+```python
+from pathlib import Path
+from optical_trap_puppet import read_puppet
+
+path = Path("example_data/tether1_puppet.dat")
+
+# Option A: pass k directly (effective stiffness, pN/nm)
+df = read_puppet(path, k=0.01)
+
+# Option B: pass stiffness (pN/nm/mW); k_eff is stiffness * power_mw
+# df = read_puppet(path, stiffness=3.93e-5)
+```
+
+There is currently **no puppet CLI entry point**. Use the Python API
+`read_puppet(...)` directly.
+
+### API and parameters
+
+```python
+read_puppet(
+    path, k=None, stiffness=None, power=None,
+    *, companion_voltage_path=None, force_ref_nm=None,
+    smooth_window=500, dv_threshold=1e-4,
+    rupture_threshold_nm=500.0, detect_rupture=False, source=None
+)
+```
+
+- `path`: puppet `.dat` trace (MATLAB-style edge columns).
+- `k` (pN/nm): effective stiffness used directly for `force_pn`.
+- `stiffness` (pN/nm/mW) + `power` (mW): used as `k_eff = stiffness * power_mw`.
+  If `k` is provided, it overrides `stiffness * power`.
+- `companion_voltage_path`: override for the voltage/power companion file.
+  If omitted, `<stem>_Voltage.dat` is used when present.
+- `force_ref_nm`: optional fixed force zero (nm). Use this when you want a
+  fixed force origin across all segments/runs instead of per-segment automatic
+  reference updates.
+- `smooth_window` (samples), `dv_threshold` (V/sample): control phase
+  segmentation from the smoothed voltage derivative.
+- `rupture_threshold_nm` (nm), `detect_rupture` (bool): optional rupture
+  marking during `pull_out`. Off by default.
+- `source`: optional run label stored in the output.
+
+### How force and phase are defined
+
+- Phases are inferred from `dV/dt` of the voltage schedule:
+  - `hold`: `|dV/dt| <= dv_threshold`
+  - `pull_out`: falling voltage (`dV/dt < -dv_threshold`)
+  - `pull_in`: rising voltage (`dV/dt > dv_threshold`)
+- Force uses trap 1 only:
+  - `force_pn = (trap1_nm - ref_nm) * k_eff`
+- If `force_ref_nm` is omitted, `ref_nm` is the mean `trap1_nm` of the
+  immediately preceding hold segment, propagated over the following ramp.
+  This default can shift pull-in force sign/magnitude on some runs; pass a
+  fixed `force_ref_nm` when you need a stable absolute reference.
+
+### Extension correction and output columns
+
+`extension_nm` is preserved raw. `extension_nm_corrected` subtracts bead radii,
+with each bead diameter estimated from the median inner/outer edge spacing.
+Diagnostics are provided in:
+
+- `bead1_diameter_nm`, `bead2_diameter_nm`
+- `bead1_radius_nm`, `bead2_radius_nm`
+
+Key output columns from `read_puppet(...)` include:
+
+- provenance/indexing: `source`, `frame_idx`, `time_s`, `valid`
+- geometry/signals: `trap1_nm`, `trap2_nm`, `extension_nm`,
+  `extension_nm_corrected`, `voltage_v`, `power_mw`
+- segmentation/force: `segment_id`, `phase`, `hold_voltage`, `k_eff`,
+  `force_ref_nm`, `force_pn`
+- optional rupture flag: `ruptured` (only when `detect_rupture=True`)
+
+`read_puppet(...)` does not emit oscillator-style `cycle` or schedule `step`
+columns. Downstream analysis infers cycle-like grouping as needed (for example,
+`analysis_cycle` in rupture-event outputs).
+
+### Downstream analysis (`optical_trap_analysis.py`)
+
+Use puppet tidy frames as input to:
+
+- `detect_dynamic_rupture_events(...)`
+- `summarize_dynamic_delta_extension(...)`
+- `detect_static_hold_rupture_events(...)`
+- `add_same_force_extension(...)`
+- `average_pull_in_trace(...)`
+
+Rupture detection inside `read_puppet(...)` is optional (`detect_rupture=False`
+by default). The main rupture/delta-extension workflow belongs in
+`optical_trap_analysis.py` as explicit post-processing.
+
 ## Analysis CLI tools (`optical_trap_tidy.py` and `optical_trap_oscillator.py`)
 
 ### MATLAB sources and example files
